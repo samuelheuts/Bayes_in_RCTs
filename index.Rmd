@@ -1,5 +1,0 @@
-# Bayes_in_RCTs
-
-You can view our vignettes with full code at https://samuelheuts.github.io/Bayes_in_RCTs/
-
-[Here](docs/CLEAR.html) is the analysis of the CLEAR trial

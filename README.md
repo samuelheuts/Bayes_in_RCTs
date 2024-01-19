@@ -18,3 +18,6 @@ CLEAR           -  Sarah M. Urbut          -  Massachusetts General Hospital, Ha
 
 
 You can view our vignettes with full code at https://samuelheuts.github.io/Bayes_in_RCTs/
+
+[Here](https://samuelheuts.github.io/Bayes_in_RCTs/CLEAR.html) is the analysis of the CLEAR trial.
+
