@@ -10,10 +10,10 @@ Samuel Heuts, MD, PhD, Michal J. Kawczynski, MD, Ahmed Sayed, MD, Sarah M. Urbut
 
 Please find below the separate authors of the re-analyses per individual trial:
 
-PROTECTED TAVR  -  Ahmed Sayed             -  Faculty of Medicine, Ain Shams University, Cairo, Egypt
+PROTECTED TAVR  -  Ahmed Sayed             -  Faculty of Medicine, Ain Shams University, Cairo, Egypt.
 
-MINT            -  Arthur M. Albuquerque   -  Universidade Federal do Rio de Janeiro, Rio de Janeiro, Brazil
+MINT            -  Arthur M. Albuquerque   -  Universidade Federal do Rio de Janeiro, Rio de Janeiro, Brazil.
 
-CLEAR           -  Sarah M. Urbut          -  Massachusetts General Hospital, Harvard Medical School, Boston, Massachusetts, USA
+CLEAR           -  Sarah M. Urbut          -  Massachusetts General Hospital, Harvard Medical School, Boston, Massachusetts, USA.
 
 
