@@ -1,0 +1,886 @@
+---
+title: "Clear Outcomes Trial"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE)
+
+# Set global options to suppress Stan verbose output
+options(stan.verbose = FALSE)
+
+# Function to silently load libraries without showing messages in the knitted output
+quietly_load_library <- function(library_name) {
+  suppressPackageStartupMessages(library(library_name, character.only = TRUE))
+}
+
+# Use the function to load required libraries
+quietly_load_library("brms")
+quietly_load_library("tidybayes")
+quietly_load_library("rstan")
+quietly_load_library("dplyr")
+quietly_load_library("ggplot2")
+quietly_load_library("ggridges")
+quietly_load_library("ggpubr")
+quietly_load_library("ggthemes")
+#quietly_load_library("bpp")
+quietly_load_library("foreach")
+```
+
+# Bayesian Model with Conjugate Multivariate Normal Priors
+
+## CLEAR TRIAL
+
+- Aim was to find a clinically meaninful difference on MACE using Bempedoic Acid in statin-intolerance patients.
+
+- Let's first compare the primary outcomes (found significant) using a unimodal Normal shrinkage prior. We take advantage that the logOR is approximately normally distributed, and that the normal distribution has a conjugate (normal) prior. This means that the Posterior and Prior take the same form, and in the case of the normal distribtuion, so does the likelihood!
+
+### Univariate primary outcomes
+
+1.  Skeptical Prior
+
+**Definition:** A skeptical prior is centered at 0, with the standard deviation calculated such that only 10% of the probability mass is to the left of the Minimal Clinically Important Difference (MCID).
+
+There is no general consensus on the MCID for a reduction in atherosclerotic cardiovascular disease (ASCVD) by lipid lowering therapies. As bempedoic acid can serve as an alternative treatment to statins in patients with statin intolerance, we based the MCID on the absolute risk reduction of statins for  ASCVD in 5 years, derived from a recent expert consensus evaluating statin therapy for primary and secondary prevention (31). CLEAR had a median follow-up of 40 months, and incorporated 30% primary prevention patients (5% ARD in 5 years in Collins et al.), and 70% secondary prevention patients (10% ARD in 5 years in Collins et al.) (31). We weighted these proportions, resulting in an MCID of 2.8% ARD in 40 months.
+
+
+Let MCID be the minimal clinically important difference converted to its log odds ratio equivalent, log_mcid. To find the standard deviation (sigma_skeptical), determine the z-score that leaves 90% of the distribution to the right of log_mcid. This z-score corresponds to the 10th percentile of the standard normal distribution.
+
+
+```{r}
+# Given data from the table
+n_treatment <- 6992
+events_treatment <- 819
+n_control <- 6978
+events_control <- 927
+
+# Calculate the odds ratio (OR)
+or <- (events_treatment / (n_treatment - events_treatment)) / (events_control / (n_control - events_control))
+
+# Convert OR to logOR
+log_or <- log(or)
+
+# Calculate the standard error of the logOR
+se_log_or <- sqrt((1 / events_treatment) + (1 / (n_treatment - events_treatment)) + (1 / events_control) + (1 / (n_control - events_control)))
+
+```
+
+Now we need to define the MCID as an absolute risk reduction of 1.3% and convert the absolute risk reduction to logOR for MCID. We show that the baseline risk in our population is events in control/n_control:
+
+```{r,echo=TRUE}
+mcid_arr <- 0.028
+
+# Assuming a baseline risk from the control group
+(baseline_risk <- events_control / n_control)
+```
+
+
+```{r}
+# Calculate the risk in the treatment group
+risk_treatment <- baseline_risk - mcid_arr
+
+# Calculate the odds for control and treatment
+odds_control <- baseline_risk / (1 - baseline_risk)
+odds_treatment <- risk_treatment / (1 - risk_treatment)
+
+# Calculate the odds ratio (OR)
+or_mcid <- odds_treatment / odds_control
+
+# For Bayesian analysis, we often use the natural log of the OR
+log_mcid <- log(or_mcid)
+
+```
+
+The risk in the treated group is the baseline risk minus the mcid_arr, and the ARR of 1.3% translates to an log OR of MCID of `r log_mcid`
+
+Here we show that these infact produce desired priors:
+
+```{r,echo=T}
+# here there is a 10% probability of the log_mcid
+z_skeptical <- qnorm(0.10)
+sigma_skeptical <- abs(log_mcid / z_skeptical)
+pnorm(log_mcid,sd=sigma_skeptical)
+```
+
+**Enthusiastic Prior Definition:** An enthusiastic prior is centered at MCID, with the standard deviation calculated such that there is a 30% probability of harm (logOR \> 0).
+
+For the enthusiastic prior, we want 70% of the distribution to be below 0 when the mean is at log_mcid. To find the standard deviation (sigma_enthusiastic), calculate the z-score that corresponds to the 70th percentile of the standard normal distribution. 
+
+We show that our choice of sigma in fact translates to this:
+
+```{r,echo=T}
+z_enthusiastic <- qnorm(0.70)
+sigma_enthusiastic <- abs((0 - log_mcid) / z_enthusiastic)
+pnorm(0,mean=log_mcid,sd = sigma_enthusiastic)
+```
+
+**Pessimistic Prior Definition:** A pessimistic prior is centered at -MCID, with the standard deviation calculated such that there is a 30% probability of benefit (logOR \< 0).
+
+For the pessimistic prior, we want 70% of the distribution to be above 0 when the mean is at -log_mcid. To find the standard deviation (sigma_pessimistic), calculate the z-score that corresponds to the 30th percentile of the standard normal distribution.
+
+```{r,echo=T}
+z_pessimistic <- qnorm(0.30)
+sigma_pessimistic <- abs((0 + log_mcid) / z_pessimistic)
+
+pnorm(0,mean=-log_mcid,sd = sigma_pessimistic)
+```
+
+
+Now, let's use these calculation to show what our skeptical, enthusiastic, and pessimistiv prior translate to in terms of prior mean \mu_{0} and variance \sigma_{0}^2:
+
+```{r echo=TRUE}
+# Install necessary packages if not already installed
+if (!require("metafor")) install.packages("metafor")
+library(rstan)
+library(metafor)
+library(reshape)
+library(ggplot2)
+library(MASS)
+library(ggplot2)
+library(reshape2)  # For melting data frames
+library(gridExtra)  # 
+library(ggpubr)
+
+# Load necessary library
+library(tidyverse)
+
+# Given data from the table
+n_treatment <- 6992
+events_treatment <- 819
+n_control <- 6978
+events_control <- 927
+
+# Calculate the odds ratio (OR)
+or <- (events_treatment / (n_treatment - events_treatment)) / (events_control / (n_control - events_control))
+
+# Convert OR to logOR
+log_or <- log(or)
+
+# Calculate the standard error of the logOR
+se_log_or <- sqrt((1 / events_treatment) + (1 / (n_treatment - events_treatment)) + (1 / events_control) + (1 / (n_control - events_control)))
+
+# Define the MCID as an absolute risk reduction of 1.3%
+mcid_arr <- 0.013
+# Convert the absolute risk reduction to logOR for MCID
+# Assuming a baseline risk from the control group
+baseline_risk <- events_control / n_control
+
+# Calculate the risk in the treatment group
+risk_treatment <- baseline_risk - mcid_arr
+
+# Calculate the odds for control and treatment
+odds_control <- baseline_risk / (1 - baseline_risk)
+odds_treatment <- risk_treatment / (1 - risk_treatment)
+
+# Calculate the odds ratio (OR)
+or <- odds_treatment / odds_control
+
+# For Bayesian analysis, we often use the natural log of the OR
+log_or <- log(or)
+
+# Define the priors based on the specifications
+
+# Skeptical Prior: 90% certainty of no clinically relevant effect, so only 10% of area 
+skeptical_sd <- abs(log_mcid / qnorm(0.10))
+skeptical_prior <- list(mu = 0, sigma = skeptical_sd)
+
+# Enthusiastic Prior: 30% probability of harm
+enthusiastic_sd <- abs(log_mcid) / qnorm(0.70)
+enthusiastic_prior <- list(mu = log_mcid, sigma = enthusiastic_sd)
+
+# Pessimistic Prior: 30% probability of benefit
+pessimistic_sd <- abs(log_mcid) / qnorm(0.70)
+pessimistic_prior <- list(mu = -log_mcid, sigma = pessimistic_sd)
+
+# Output the calculated values and the priors
+list(
+  log_or = log_or,
+  se_log_or = se_log_or,
+  skeptical_prior = skeptical_prior,
+  enthusiastic_prior = enthusiastic_prior,
+  pessimistic_prior = pessimistic_prior
+)
+
+```
+
+## Conjugate analysis:
+
+- We show the skeptical, ethnusiastic, and pessimistic result using the respective priors
+- Recall that the posterior mean and variance are calculated using the following formulas:
+
+**Posterior Mean:**
+$$
+\mu_{\text{post}} = \frac{\mu_{\text{prior}} / \sigma_{\text{prior}}^2 + \mu_{\text{likelihood}} / \sigma_{\text{likelihood}}^2}{1 / \sigma_{\text{prior}}^2 + 1 / \sigma_{\text{likelihood}}^2}
+$$
+
+**Posterior Variance:**
+$$
+\sigma_{\text{post}}^2 = \frac{1}{1 / \sigma_{\text{prior}}^2 + 1 / \sigma_{\text{likelihood}}^2}
+$$
+
+Where:
+
+- \( \mu_{\text{prior}} \) and \( \sigma_{\text{prior}} \) are the mean and standard deviation of the prior distribution.
+- \( \mu_{\text{likelihood}} \) and \( \sigma_{\text{likelihood}} \) are the mean and standard deviation of the likelihood.
+
+So you can see that the posterior mean is really a weighted average of the data and prior mean, with more emphasis placed on the one with a smaller variance.
+
+```{r}
+# Function to calculate the posterior
+calc_conjugate_posterior <- function(log_or, se, prior) {
+  var_prior <- prior$sigma^2
+  var_data <- se^2
+  var_post <- 1 / (1 / var_prior + 1 / var_data)
+  mu_post <- var_post * (log_or / var_data + prior$mu / var_prior)
+  return(list(mu = mu_post, sigma = sqrt(var_post)))
+}
+
+# Calculate the posterior for the skeptical prior
+posterior_skeptical <- calc_conjugate_posterior(log_or, se_log_or, skeptical_prior)
+
+
+posterior_enthus <- calc_conjugate_posterior(log_or, se_log_or, enthusiastic_prior)
+
+posterior_pess <- calc_conjugate_posterior(log_or, se_log_or, pessimistic_prior)
+
+```
+
+- posterior skeptical:`r posterior_skeptical`
+- posterior enthusiastic:`r posterior_enthus`
+- posterior pessimistic: `r posterior_pess`
+
+### Summaries
+
+We can return the probabilities for the log OR of 0 and for the MCID here:
+
+- Under a noninformative prior:
+
+```{r}
+pnorm(0,mean = log_or,sd = se_log_or)
+pnorm(log_mcid,mean = log_or,sd = se_log_or)
+```
+
+- Under a skeptical prior
+
+```{r}
+pnorm(0,mean = posterior_skeptical$mu,sd = posterior_skeptical$sigma)
+pnorm(log_mcid,mean = posterior_skeptical$mu,sd = posterior_skeptical$sigma)
+```
+
+- the enthusiastic prior
+
+```{r}
+pnorm(0,mean = posterior_enthus$mu,sd = posterior_enthus$sigma)
+pnorm(log_mcid,mean = posterior_enthus$mu,sd = posterior_enthus$sigma)
+```
+
+- the pessimistic prior
+
+```{r}
+pnorm(0,mean = posterior_pess$mu,sd = posterior_pess$sigma)
+pnorm(log_mcid,mean = posterior_pess$mu,sd = posterior_pess$sigma)
+```
+
+```{r,warning=FALSE}
+
+# Your existing data and calculations here...
+
+# Function to generate a density plot for prior, likelihood, and posterior
+# Function to generate a plot with shaded areas for prior, likelihood, and posterior
+plot_distribution_shaded <- function(title, prior, likelihood, posterior) {
+  # Creating a data frame for plotting
+  x_values <- seq(-3, 3, length.out = 100)
+  df <- data.frame(
+    x = x_values,
+    prior = dnorm(x_values, mean = prior$mu, sd = prior$sigma),
+    likelihood = dnorm(x_values, mean = likelihood$mu, sd = likelihood$sigma),
+    posterior = dnorm(x_values, mean = posterior$mu, sd = posterior$sigma)
+  )
+
+  # Plotting with shaded areas
+  ggplot(df) +
+    geom_area(aes(x = x, y = prior, fill = "Prior"), alpha = 0.5, color = NA) +
+    geom_area(aes(x = x, y = likelihood, fill = "Likelihood"), alpha = 0.5, color = NA) +
+    geom_area(aes(x = x, y = posterior, fill = "Posterior"), alpha = 0.5, color = NA) +
+    scale_fill_manual(values = c("Prior" = "red", "Likelihood" = "blue", "Posterior" = "green")) +
+    lims(x=c(-1,1))+
+    ggtitle(title) +
+    labs(fill="Prior")+
+    theme_classic() 
+    # Remove legend if not needed
+}
+
+# Define the likelihood (assumed normal distribution around log_or with standard error se_log_or)
+likelihood <- list(mu = log_or, sigma = se_log_or)
+
+# Plotting for each prior
+p1 <- plot_distribution_shaded("Skeptical Prior", skeptical_prior, likelihood, posterior_skeptical)
+p2 <- plot_distribution_shaded("Enthusiastic Prior", enthusiastic_prior, likelihood, posterior_enthus)
+p3 <- plot_distribution_shaded("Pessimistic Prior", pessimistic_prior, likelihood, posterior_pess)
+
+# Combining the plots in 3 rows
+combined_plot <- ggarrange(p1, p2, p3, ncol = 1, nrow = 3)
+
+# Display the combined plot
+print(combined_plot)
+```
+
+**We Show that this approximates the MCMC result**
+
+We've used ana analytic approach to calculate the posterior mean which takes advantage of the fact that 
+```{r, error=TRUE, results='hide', message=FALSE, warning=FALSE}
+tryCatch({
+  # Your R code that might cause errors
+}, error = function(e) {
+  # Write the error to a log file
+  writeLines(as.character(e$message), "error_log.txt")
+})
+
+library(rstanarm)
+# Globally set stan.verbose to FALSE
+options(stan.verbose = FALSE)
+# Redirect all output to NULL during model fitting
+sink(file = "/dev/null", type = "output")
+
+stan_model_code <- "
+data {
+  real logOR;             // Log odds ratio
+  real<lower=0> SE;       // Standard error
+  real<lower=0> sd_prior; // Standard deviation of the  prior
+  real mu_prior; // mean of the  prior
+}
+parameters {
+  real theta;  // Parameter (log odds ratio) to estimate
+}
+model {
+  // Skeptical prior for theta
+  theta ~ normal(mu_prior, sd_prior);
+  
+  // Likelihood
+  logOR ~ normal(theta, SE);
+}
+"
+
+stan_data <- list(logOR = log_or, SE = se_log_or, sd_prior = 20,mu_prior=0)
+
+# Run MCMC simulation
+fit <- stan(model_code = stan_model_code, data = stan_data, iter = 4000, chains = 4,verbose = FALSE,refresh=0)
+
+```
+
+- Extract the results of the noninformative prior
+
+```{r}
+summary(fit)$summary
+```
+
+
+- Extract the results of the skeptical prior
+
+```{r}
+# Prepare data for Stan, including skeptical_sd
+stan_data <- list(logOR = log_or, SE = se_log_or, sd_prior = skeptical_sd,mu_prior=0)
+
+# Run MCMC simulation
+fit <- stan(model_code = stan_model_code, data = stan_data, iter = 4000, chains = 4,verbose = FALSE,refresh=0)
+
+summary(fit)$summary
+```
+
+**For the enthusiastic**
+
+- Prepare data for Stan, including enthusiastic_sd
+
+```{r}
+stan_data <- list(logOR = log_or, SE = se_log_or, mu_prior=enthusiastic_prior$mu,sd_prior = enthusiastic_prior$sigma)
+
+# Run MCMC simulation
+fit <- stan(model_code = stan_model_code, data = stan_data, iter = 4000, chains = 4,verbose = FALSE,refresh=0)
+
+# Extract the results
+summary(fit)$summary
+```
+
+**now for pessimistic**
+
+- Prepare data for Stan, including skeptical_sd
+
+```{r}
+stan_data <- list(logOR = log_or, SE = se_log_or, mu_prior=pessimistic_prior$mu,sd_prior = pessimistic_prior$sigma)
+
+# Run MCMC simulation
+fit <- stan(model_code = stan_model_code, data = stan_data, iter = 4000, chains = 4,verbose = FALSE,refresh=0)
+
+# Extract the results
+summary(fit)$summary
+```
+
+
+We can see that these results demonstrate the conjugate normal is perfectly approximated by MCMC here.
+
+
+## Reference Prior
+
+Now for the reference prior, we will perform a Bayesian meta analysis, and then use the results in both a conjugate and MCMC analysis to show the results match.
+
+
+\item A separate baseline risk of CAD for each study (via factor(study)).
+\item A common treatment effect of Bempedoic acid across all studies (via the bpd term).
+\item Variation in the treatment effect of Bpd across different studies (via the random effect (bpd - 1|study)).
+
+# Bayesian Hierarchical Model for MACE Data
+
+## Model Structure
+
+The model is structured to estimate the effect of a treatment (BPD) on the occurrence of MACE (Major Adverse Cardiac Events) across different studies. 
+
+### Stage I: Data Model (Likelihood)
+
+At this level, the model specifies the observed counts of MACE within each study:
+
+- \( Y_{ij} | p_{ij} \sim \text{Binomial}(n_{ij}, p_{ij}) \)
+
+Where:
+
+- \( Y_{ij} \) represents the number of MACE observed in the \( i \)-th treatment group of the \( j \)-th study.
+- \( n_{ij} \) is the total number of trials or participants in the \( i \)-th treatment group of the \( j \)-th study.
+- \( p_{ij} \) is the probability of MACE in the \( i \)-th treatment group of the \( j \)-th study.
+
+### Stage II: Parameter Model (Fixed and Random Effects)
+
+The model for the log-odds of MACE combines study-specific baselines and treatment effects:
+
+- \( \text{logit}(p_{ij}) = \alpha_j \cdot \text{Study}_{j} + \beta \cdot \text{BPD}_{i} + u_{j} \cdot \text{BPD}_{ij} \)
+
+Where:
+
+- \( \alpha_j \) is the study-specific intercept (baseline log-odds of MACE when BPD=0).
+- \(  \text{Study}_{j}\) is the study-specific indicator for the \( j \)-th study (0 for $k \neq j$)
+
+- \( \beta \) is the fixed effect of the BPD treatment (the average log-odds ratio of MACE for BPD=1 versus BPD=0) across all studies (no j)
+- \( u_{j} \) is the random effect representing the study-specific deviation in treatment effect from the average treatment effect \( \beta \).
+- \( \text{BPD}_{ij} \) is the treatment indicator (0 for absence, 1 for presence) for the \( i \)-th group in the \( j \)-th study.
+
+### Stage III: Hyperparameter Model (Priors)
+
+The model defines priors for parameters and hyperparameters as follows:
+
+- Priors for \( \alpha_j \): \( \alpha_j \sim \text{Normal}(\mu_{\alpha}, \sigma_{\alpha}^2) \)
+- Prior for \( \beta \): \( \beta \sim \text{Normal}(\mu_{\beta}, \sigma_{\beta}^2) \)
+- Priors for \( u_{j} \): \( u_{j} \sim \text{Normal}(0, \sigma_{u}^2) \)
+
+### Stage IV: Prior Specification
+
+Priors are specified based on domain knowledge or assumptions:
+
+- \( \mu_{\alpha} \), the mean of the normal prior for the baseline rate, might be set to \(-3.2\) based on the 4% baseline MACE rate.
+- \( \sigma_{\alpha} \), the standard deviation of the baseline rate across studies, would be set according to expected variability.
+- \( \mu_{\beta} \) and \( \sigma_{\beta} \), the mean and standard deviation for the treatment effect, would be based on prior belief about the effectiveness of BPD.
+- \( \sigma_{u} \), the standard deviation of the random slopes, represents between-study variability in the treatment effect.
+
+
+```{r,echo=TRUE}
+#Trial 1: goldberg et al
+goldberg <- data.frame(
+  study = "goldberg",
+  #Trial name
+  total_n = c(522, 257),
+  #Total sample size in each group
+  events_n = c(32, 21),
+  #Patients with MACE in each group
+  bpd = c(1,0) #bpd (Yes/No)
+)
+
+#Trial 2: laufs et al
+laufs <- data.frame(
+  study = "laufs",
+  #Trial name
+  total_n = c(234, 111),
+  #Total sample size in each group
+  events_n = c(9, 0),
+  #Patients with MACE in each group
+  bpd = c(1,0) #bpd 1/0 (Yes/No)
+)
+
+
+#Trial 3: Ray
+ray <- data.frame(
+  study = "ray",
+  #Trial name
+  total_n = c(1487, 742),
+  #Total sample size in each group
+  events_n = c(68, 42),
+  #Patients with MACE in each group
+  bpd = c(1,0) #bpd 1/0 (Yes/No)
+)
+
+
+#Combine the data from the 6 trials into a single dataframe
+combined_data <- rbind(goldberg, ray, laufs)
+
+```
+
+First, we will conduct a meta-analysis of the 3 RCTs that tested bempedoic acid. This meta-analysis will form the basis of our subsequent prior.
+
+Now, we will set up our priors (on the log-odds scale), as we recall that the natural link for a binomial process is the logit function, and the logOR is normally distributed.
+
+\item Treatment effect prior, is `flat' suggesting that all the information will be gelamed from the observed studies which will inform our later posterior
+
+\item Fixed effect prior for MACE within the population, which is centered on the logOR of 6% (-2.8) that we observe in the placebo arms here
+
+\item Heterogeneity prior, a 'fat tailed' cauchy prior with sd 0.5, commonly chosen in meta analyses
+
+We write this as a formula $$events/total \propto 0 + factor(study) + bpd + (bpd - 1 | study)$$
+
+1. The baseline MACE rate for each study, which is captured by `0 + factor(study)`. This part of the model says that each study has its own baseline rate of MACE, with no overall intercept (because of the `0 +`).
+
+2. The shared treatment effect of BPD, which is captured by `bpd`. This is a fixed effect that is consistent across all studies. It represents the average effect of BPD on MACE across all studies.
+
+3. The random effect of BPD by study, which is captured by `(bpd - 1 | study)`. This term allows the effect of BPD to vary for each study around the overall average treatment effect. This is where the variability in treatment effect between studies is modeled.
+
+Given out description, here’s how we should set your priors:
+
+- For the baseline MACE rate for each study, you want to set a separate prior for each study. These are fixed effects and should be given a normal prior centered around the log-odds you mentioned, corresponding to a 4% rate.
+
+- For the shared treatment effect of BPD, you would set a prior reflecting your belief about the average effect of BPD. This prior would be on a global scale, not varying by study.
+
+- For the random effect of BPD by study, you would set a prior that reflects your uncertainty in the variability of the BPD effect across studies. This is typically a prior on the standard deviation of the random effect.
+
+So, your priors could look something like this:
+
+```{r}
+# Set priors for the baseline MACE rate for each study
+study_priors <- c(
+  prior(normal(-2.8, 0.5), class = "b", coef = "factorstudygoldberg"),
+  prior(normal(-2.8, 0.5), class = "b", coef = "factorstudylaufs"),
+  prior(normal(-2.8, 0.5), class = "b", coef = "factorstudyray")
+)
+
+# Set a prior for the shared treatment effect of BPD
+bpd_effect_prior <- prior(normal(0, 10), class = "b", coef = "bpd")
+
+# Set a prior for the variability in BPD effect across studies
+bpd_study_sd_prior <- prior(cauchy(0, 0.5), class = "sd", group = "study")
+
+# Combine all the priors
+ma_priors <- c(study_priors, bpd_effect_prior, bpd_study_sd_prior)
+```
+
+
+#Now, we will write the formula we will use in the regression model
+
+```{r, error=TRUE, results='hide', message=FALSE, warning=FALSE}
+tryCatch({
+  # Your R code that might cause errors
+}, error = function(e) {
+  # Write the error to a log file
+  writeLines(as.character(e$message), "error_log.txt")
+})
+
+ma_formula <- bf(events_n |
+                   trials(total_n) ~ 0 + #Remove the intercept from the model (such that the risk of stroke is not modeled using a common term but is modeled separately for each study)
+                   factor(study) + #A term to refer to each study
+                   bpd + # Fixed treatment effect of bpd
+                   (bpd - 1 |study)) # We allow for a random slope, but a fixed intercept effect
+
+options(mc.cores = parallel::detectCores())
+
+ma_model <-
+  brm(
+    ma_formula,
+    data = combined_data,
+    family = binomial(),
+    prior = ma_priors,
+    seed = 100,
+    control = list(adapt_delta = 0.99),verbose=FALSE
+  )
+
+```
+
+
+This setup should align with your objectives of modeling the baseline rate separately for each study, a common treatment effect, and variability in that treatment effect across studies. Here we output the result
+
+
+```{r plotting,echo=T}
+#ma_model=readRDS("~/Library/CloudStorage/Dropbox-Personal/ma_model.rds")
+
+sum_ma_model <- summary(ma_model)
+print(sum_ma_model)
+
+#Get the parameters of the row which corresponds to the treatment (BPD)
+ma_bpd_par <- sum_ma_model$fixed[rownames(sum_ma_model$fixed) == "bpd", ]
+
+##Store relevant variables
+#The log odds ratio
+ma_bpd_lnor <- round(ma_bpd_par$Estimate, 2)
+#Standard error of the log odds ratio
+ma_bpd_lnor_sd <- round(ma_bpd_par$Est.Error, 2)
+#The odds ratio
+ma_bpd_or <- round(exp(ma_bpd_par$Estimate), 2)
+#The lower limit of the 95% credible interval of the odds ratio
+ma_bpd_or_lci <- round(exp(ma_bpd_par$`l-95% CI`), 2)
+#The upper limit of the 95% credible interval of the odds ratio
+ma_bpd_or_uci <- round(exp(ma_bpd_par$`u-95% CI`), 2)
+```
+
+```{r}
+#Sample the posterior distribution of study-level estimates and the overall estimate of treatment effect
+study_es <- ma_model %>%
+  spread_draws(r_study[study, ], b_bpd) %>%
+  mutate(b_bpd = r_study + b_bpd, #Create treatment effect estimates for each study
+         type = "Study-level estimate") #Clarify that this is the treatment effect for each study
+
+
+pooled_es <- spread_draws(ma_model, b_bpd) %>% 
+  mutate(study = "Overall Effect Size", #Clarify that this is the pooled/overall treatment effect
+         type = "Pooled estimate") #Same
+
+#Exponentiate to get odds instead of log-odds ratio
+fp_data <- bind_rows(study_es, pooled_es) %>%
+  mutate(b_bpd = b_bpd %>% exp)
+
+# Assuming 'author' is the column in your dataset that contains these names
+# Replace 'Goldber' with 'Clear Wisdom'
+fp_data$study <- gsub("goldberg", "CLEAR Wisdom", fp_data$study)
+
+# Replace 'Laufs' with 'Clear Serenity'
+fp_data$study <- gsub("laufs", "CLEAR Serenity", fp_data$study)
+
+# Replace 'Ray' with 'Clear Harmony'
+fp_data$study <- gsub("ray", "CLEAR Harmony", fp_data$study)
+
+
+#Create title and subtitles for the plot
+main_title <- "Meta-analysis-based prior for the effectiveness of BPD in preventing MACE"
+subtitle <- "This analysis synthesizes the 3 RCTs constituting the RCT evidence base for BPD prior to the CLEAR Trial."
+
+library(forcats)
+
+
+# Assuming fp_data$study is a factor with levels ordered as you originally had them
+# Reverse the levels to put 'Overall Effect Size' at the bottom
+fp_data$study <- fct_rev(fp_data$study)
+
+# Now plot your data with ggplot2
+g=ggplot(data = fp_data, aes(y = study, x = b_bpd, fill = type)) +
+  geom_density_ridges(col = NA, scale = 0.9, alpha = 0.7) +
+  geom_vline(xintercept = 1, color = "black", lwd = 1, linetype = 2) +
+  scale_fill_manual(values = c("salmon","lightblue")) + # Make sure the colors are in the right order
+  ggtitle(main_title, subtitle = subtitle) +
+  scale_y_discrete(name = "Study") +
+  scale_x_continuous(name = "Odds Ratio", trans = "log", breaks = c(0.5, 1, 2)) +
+  coord_cartesian(xlim = c(0.5, 2)) +
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title = element_text(face = "bold", hjust = 0.0, size = 20),
+        plot.subtitle = element_text(face = "bold", size = 15, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold"),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none",
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm"))
+
+g
+
+ggsave(g,file="~/Library/CloudStorage/Dropbox-Personal//metaplot.png",width = 15,height=10)
+
+```
+
+## Now let's use this as a prior
+
+We will show with MCMC and with conjugate normal
+
+```{r, error=TRUE, results='hide', message=FALSE, warning=FALSE}
+tryCatch({
+  # Your R code that might cause errors
+}, error = function(e) {
+  # Write the error to a log file
+  writeLines(as.character(e$message), "error_log.txt")
+})
+
+# Enter the data from the table into a data frame
+meta_data <- data.frame(
+  study = c("Goldberg et al., 2019", "Laufs et al., 2019", "Ray et al., 2019", "Nissen et al., 2023"),
+  group = rep(c("Bempedoic Acid", "Placebo"), each = 4),
+  events = c(32, 9, 68, 831, 21, 1, 42, 927), ## add a 1 to make it computable
+  total = c(522, 234, 1487, 6992, 257, 111, 742, 6978)
+)
+
+
+# Likelihood data from the Nissen study
+likelihood_data <- meta_data[meta_data$study == "Nissen et al., 2023",]
+
+ma_bpd_lnor <- round(ma_bpd_par$Estimate, 2)
+#Standard error of the log odds ratio
+ma_bpd_lnor_sd <- round(ma_bpd_par$Est.Error, 2)
+
+# Convert 'group' to a factor and create a binary treatment indicator
+likelihood_data$bpd <- ifelse(likelihood_data$group == "Bempedoic Acid", 1, 0)
+
+library(brms)
+# Define the prior
+# Define the mean and standard deviation for the log OR
+log_or_mean <- ma_bpd_lnor  # Mean log OR
+log_or_sd <- ma_bpd_lnor_sd    # Standard deviation of the log OR
+
+# Assuming 'bpd' is the name of the variable for the treatment effect in your model
+# Set the prior using the mean and standard deviation
+nissen_prior <- set_prior(
+  paste("normal(", log_or_mean, ",", log_or_sd, ")"), 
+  class = "b", 
+  coef = "bpd"
+)
+
+# Verify the prior
+nissen_model <- brm(
+  formula = bf(events | trials(total) ~ bpd),  # Update 'bpd' if your variable name is different
+  data = likelihood_data,
+  family = binomial(),
+  prior = nissen_prior,
+  seed = 102,
+  control = list(adapt_delta = 0.95),verbose=FALSE
+)
+
+#saveRDS(nissen_model,"~/Library/CloudStorage/Dropbox-Personal/nissen_model.rds")
+```
+
+
+# Summary of the Nissen study model
+
+```{r}
+#nissen_model=readRDS("~/Library/CloudStorage/Dropbox-Personal/nissen_model.rds")
+summary(nissen_model)
+```
+
+Now let's show that this matches with our conjugate analysis
+
+```{r}
+# Given data from the table
+n_treatment <- 6992
+events_treatment <- 831
+n_control <- 6978
+events_control <- 927
+
+# Calculate the odds ratio (OR)
+or <- (events_treatment / (n_treatment - events_treatment)) / (events_control / (n_control - events_control))
+
+# Convert OR to logOR
+log_or <- log(or)
+
+# Calculate the standard error of the logOR
+se_log_or <- sqrt((1 / events_treatment) + (1 / (n_treatment - events_treatment)) + (1 / events_control) + (1 / (n_control - events_control)))
+
+
+calc_conjugate_posterior(log_or = log_or,se = se_log_or,prior = list(mu=ma_bpd_lnor,sigma=ma_bpd_lnor_sd))
+pm=calc_conjugate_posterior(log_or = log_or,se = se_log_or,prior = list(mu=ma_bpd_lnor,sigma=ma_bpd_lnor_sd))
+
+## we shos that these are quite close and differ likely because we also place a prior on baseline effects here
+```
+
+Now let's analysie the posterior in light of the old evidence
+
+First we simulate from each distribution:
+
+```{r}
+prior_sim <- rnorm(n = 10000, #Number of simulations
+      mean = ma_bpd_lnor, #The log-OR from our meta-analysis
+      sd = ma_bpd_lnor_sd) #The standard error of the log-OR from our meta-analysis
+
+
+#likelihood sim
+likelihood_sim <- rnorm(n = 10000,
+                   mean = log_or,
+                   sd = se_log_or)
+
+## posterior sim
+post_sim <- rnorm(n = 10000,
+                   mean = -0.13,
+                   sd = 0.05)
+
+
+
+##Let us recap the 3 distributions we now have:
+# "prior_sim", which contains our prior (obtained from the meta-analysis)
+# "likelihood_sim" which contains the data from the CLEAR2 Ttrial
+# "post_sim" which contains the data from our posterior (the combination of the above 2)
+```
+
+
+```{r,echo=TRUE}
+#First, let us create a dataframe containing the above 3 simulations
+sims <- data.frame(sim_lnor = c(prior_sim, likelihood_sim, post_sim), #This column contains the results of our simulations (each of length 10,000)
+           sim_type = rep(c("Prior", "Likelihood", "Posterior"), each = 10000) #This column contains the labels of these simulations so we can identify which simulation each row belongs to
+           )
+
+#Arrange sim_type so that it shows up with the prior on top, the posterior at the bottom, and likelihood in the middle.
+sims$sim_type <- factor(sims$sim_type, levels = c("Posterior", "Likelihood", "Prior"))
+
+#Create title and subtitles for the plot
+main_title <- "Posterior estimate: Bempedoic Acid Effect"
+subtitle <- "Prior evidence is based on a meta-analysis of 3 RCTs testing Bempedoic Acid"
+
+
+#Now, let us visualize this:
+#Plot
+g1=ggplot(data = sims,
+       aes(y = sim_type,
+           x = exp(sim_lnor),
+           fill = sim_type
+       )) +
+  #Add Density plots
+  stat_halfeye(alpha = 0.7, .width = 0.95) +
+  #Set colors
+  scale_fill_manual(name = "Information source:",
+                    values = c("lightblue", "darkolivegreen", "salmon")) +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set x-axis limit
+  coord_cartesian(xlim = c(0.5, 2.0)) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = NULL, expand = c(0, 0.03)) +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.5, 1, 2)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 15, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 20, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+
+g1
+
+ggsave(g1,file="~/Library/CloudStorage/Dropbox-Personal/post.png",width = 11,height=10)
+```
+
+Now, let's report the 95% CI and the posteriors under this meta -analysis results
+
+```{r}
+pnorm(0,mean= -0.13 ,sd = 0.05)
+pnorm(log_mcid,mean= -0.13 ,sd = 0.05)
+
+summary(nissen_model)
+```

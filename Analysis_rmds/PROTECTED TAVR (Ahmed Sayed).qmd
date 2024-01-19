@@ -1,0 +1,1296 @@
+---
+title: "The Application of Bayesian Analytical Methods to Cardiovascular Clinical Trials: Why, When, and How: JACC Review Topic of the Week"
+subtitle: "Case Study: PROTECTED TAVR under the Bayesian Lens."
+format: 
+  html:
+    toc: true
+    toc-location: body
+date: 1-7-2024
+theme: darkly
+author:
+  - name: "Ahmed Sayed (asu.ahmed.sayed@gmail.com)"
+    affiliations: "Ain Shams University, Faculty of Medicine"
+embed-resources: true
+toc: true
+toc-expand: 2
+toc-title: Contents
+page-layout: full
+code-fold: true
+editor: visual
+---
+
+# **Overview of the trial and intervention**
+
+Stroke is a feared complication of transcatheter aortic valve replacement commonly thought to be due to emboli arising from the vasculature or the aortic valve itself during valve deployment. The premise behind cerebral emoblic protection (CEP) devices is that they can capture the resulting debris before it reaches the brain, thereby reducing the risk of postprocedural stroke. Since the first approval in June 1, 2017, the effectiveness of these devices has been a controversial matter. In this section, a recent trial published in the *New England Journal of Medicine,* PROTECTED TAVR, is analyzed in a Bayesian manner to demonstrate how Bayesian methods can be used to inform clinical decision-making using the available data.
+
+```{r message = FALSE, warning = FALSE}
+#  #Check if the rendering data is already present in your working directory (as is the case if you have run this analysis before)
+if("Rendering Data.RData" %in% dir()) {
+load("Rendering Data.RData") #If so, load the data to speed up rendering and skip the MCMC simulations (rather than having to waste time on redoing the same MCMC simulations with brms)
+}
+
+##First, we will conduct a meta-analysis of the 6 RCTs that tested similar filter-based devices. This meta-analysis will form the basis of our subsequent prior
+
+#Load the packages & functions that we will need for this analysis
+require("brms")
+require("tidybayes")
+require("dplyr")
+require("ggplot2")
+require("ggridges")
+require("ggpubr")
+require("ggthemes")
+require("bpp")
+require("foreach")
+
+#Please note that, for all trials, we extracted the data for the shortest period possible following the intervention, as design of the PROTECT TAVR trial was centered around periprocedural stroke and not long-term stroke
+
+#Trial 1: DEFLECT-III (Stroke within 30 days; Table 2 from https://doi.org/10.1093/eurheartj/ehv191)
+deflect_iii <- data.frame(
+  study = "DEFLECT-III", #Trial name
+  total_n = c(46, 39), #Total sample size in each group
+  events_n = c(1, 2), #Patients with Stroke in each group
+  cepd = c(0.5, -0.5) #CEPD (Yes/No)
+)
+
+#Trial 2: MISTRAL-C (Stroke within 30 days; Table 2 from https://doi.org/10.4244/EIJV12I4A84)
+mistralc <- data.frame(
+  study = "MISTRAL-C", #Trial name
+  total_n = c(32, 33), #Total sample size in each group
+  events_n = c(0, 2), #Patients with Stroke in each group
+  cepd = c(0.5, -0.5) #CEPD 1/0 (Yes/No)
+)
+
+
+#Trial 3: CLEAN-TAVI (All-cause stroke within 1 week; eTable 8 from https://doi.org/10.1001/jama.2016.10302)
+clean_tavi <- data.frame(
+  study = "CLEAN-TAVI", #Trial name
+  total_n = c(50, 50), #Total sample size in each group
+  events_n = c(5, 5), #Patients with Stroke in each group
+  cepd = c(0.5, -0.5) #CEPD 1/0 (Yes/No)
+)
+
+#Trial 4: SENTINEL (Stroke within 30 days; Table 2 from https://doi.org/10.1016/j.jacc.2016.10.023)
+sentinel <- data.frame(
+  study = "SENTINEL", #Trial name
+  total_n = c(231, 110), #Total sample size in each group
+  events_n = c(13, 10), #Patients with Stroke in each group
+  cepd = c(0.5, -0.5) #CEPD 1/0 (Yes/No)
+)
+
+#Trial 5: REFLECT I (All-cause stroke within-hospital; Table 4 from https://doi.org/10.1093/eurheartj/ehab213)
+reflect_i <- data.frame(
+  study = "REFLECT-I", #Trial name
+  total_n = c(141, 63), #Total sample size in each group
+  events_n = c(13, 4), #Patients with Stroke in each group
+  cepd = c(0.5, -0.5) #CEPD 1/0 (Yes/No)
+)
+
+#Trial 6: REFLECT II (All-cause stroke within 1 week; Table 4 from https://doi.org/10.1016/j.jcin.2020.11.011)
+reflect_ii <- data.frame(
+  study = "REFLECT-II", #Trial name
+  total_n = c(112, 119), #Total sample size in each group
+  events_n = c(11, 7), #Patients with Stroke in each group
+  cepd = c(0.5, -0.5) #CEPD 1/0 (Yes/No)
+)
+
+#Combine the data from the 6 trials into a single dataframe
+combined_data <- rbind(deflect_iii, mistralc, clean_tavi, sentinel, reflect_i, reflect_ii)
+
+#Now, we will write the formula we will use in the regression model
+ma_formula <- bf(
+  events_n | trials(total_n) ~ 0 + #Remove the intercept from the model (such that the risk of stroke is not modeled using a common term but is modeled separately for each study)
+    factor(study) + #A term to refer to each study
+    cepd + #Treatment effect of CEPD
+    (cepd - 1|study) #Random effects (so as to not assume CEPD has the same effect in every trial)
+)
+
+##Now, we will set up our priors (on the log-odds scale)
+
+#Prior for the Treatment effect of CEPD (a normal distribution with a mean of 0 and a standard deviation of 10 implies we do not have any pre-existing information outside these trials for how beneficial or harmful this type of device may be)
+cepd_prior <- prior(normal(0, 10), class = b, coef = "cepd")
+
+#Prior for the Baseline risk of stroke (this prior is centered on a baseline risk of stroke of ~4%, which corresponds to our a priori knowledge at the time of these studies that strokes occur in 2-6% of patients post TAVR)
+stroke_prior <- prior(normal(-3.2, 0.5), class = b)
+
+#Prior for between-trial Heterogeneity (this prior expresses our uncertainty about how similar trials are to one another in terms of the effectiveness of CEPD. A half-cauchy with a scale parameter of 0.5 represents a common choice in most meta-analyses)
+heterogeneity_prior <- prior(cauchy(0, 0.5), class = sd)
+
+#Now, we will collect these priors together and store them in "ma_priors" (ma: meta-analysis)
+ma_priors <- c(cepd_prior, stroke_prior, heterogeneity_prior)
+
+#Because Bayesian analyses can be somewhat time-consuming, we will use all the cores our machine has to increase computational speed
+options(mc.cores = parallel::detectCores())
+
+if(!exists("ma_model")) {
+#Run the model incorporating both the prior you chose and the data at hand
+ma_model <- brm(data = combined_data, #Use the combined dataset for the 6 trials
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ma_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = ma_priors, #Use our prior
+               control = list(adapt_delta = 0.99) #Set a higher target average acceptance probability than the default to prevent divergent transitions (this is a computational aspect unrelated to the core of the analysis)
+               )
+}
+
+#Store a summary of this model
+sum_ma_model <- summary(ma_model)
+
+#Get the parameters of the row which corresponds to the treatment (CEPD)
+ma_cepd_par <- sum_ma_model$fixed[rownames(sum_ma_model$fixed) == "cepd", ]
+
+##Store relevant variables
+#The log odds ratio
+ma_cepd_lnor <- round(ma_cepd_par$Estimate, 2)
+#Standard error of the log odds ratio
+ma_cepd_lnor_sd <- round(ma_cepd_par$Est.Error, 2)
+#The odds ratio
+ma_cepd_or <- round(exp(ma_cepd_par$Estimate), 2)
+#The lower limit of the 95% credible interval of the odds ratio
+ma_cepd_or_lci <- round(exp(ma_cepd_par$`l-95% CI`), 2)
+#The upper limit of the 95% credible interval of the odds ratio
+ma_cepd_or_uci <- round(exp(ma_cepd_par$`u-95% CI`), 2)
+```
+
+# **Formulating prior based on previous randomized clinical trials**
+
+A major advantage of Bayesian approaches to inference is the ability to incorporate prior data and knowledge from pre-existing sources. A reasonable starting point for trials testing medical interventions is prior RCTs (and, if applicable, meta-analyses of RCTs) conducted prior to the trial of interest. We begin by conducting a meta-analysis of 6 RCTs preceding PROTECT TAVR identified from a meta-analysis by Heuts et al. The results of this meta-analysis, which was itself conducted using weakly informative priors (corresponding to a lack of apriori evidence), are shown in **Figure 1**. The overall estimate is an odds ratio is `r ma_cepd_or` (95% credible interval: `r ma_cepd_or_lci` to `r ma_cepd_or_uci`), which will now be used as a prior for our analysis of the results from PROTECTED TAVR trial.
+
+Priors are set using a family of probability distributions. Although there are a variety of families available to the analyst, it is common to use a normal distribution for priors of treatment effects. The mean and the standard deviation are the 2 parameters characterizing a normal distribution. The mean represents our current best estimate of the treatment's effect, and the standard deviation reflects our uncertainty in that estimate. To allow the results of the meta-analysis to inform our analysis of the PROTECT TAVR trial, we will simply use the estimated log-odds ratio (`r ma_cepd_lnor`) as the mean of our normal prior (our current best estimate of CEPD's effectiveness at reducing stroke) and the standard error of the log-odds ratio (`r ma_cepd_lnor_sd`) as its standard deviation (our uncertainty in that estimate).
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+##Figure 1
+
+#Sample the posterior distribution of study-level estimates and the overall estimate of treatment effect
+study_es <- ma_model %>%
+  spread_draws(r_study[study, ], b_cepd) %>%
+  mutate(b_cepd = r_study + b_cepd, #Create treatment effect estimates for each study
+         type = "Study-level estimate") #Clarify that this is the treatment effect for each study
+         
+
+pooled_es <- spread_draws(ma_model, b_cepd) %>% 
+  mutate(study = " Overall Effect Size", #Clarify that this is the pooled/overall treatment effect
+         type = "Pooled estimate") #Same
+
+#Exponentiate to get odds instead of log-odds ratio
+fp_data <- bind_rows(study_es, pooled_es) %>%
+  mutate(b_cepd = b_cepd %>% exp)
+
+
+
+#Create title and subtitles for the plot
+main_title <- "Figure 1: Creating a meta-analysis-based prior for the effecitveness of CEPD in preventing stroke"
+subtitle <- "This analysis synthesizes the 6 RCTs constituting the RCT evidence base for CEPD prior to the PROTECTED TAVR trial."
+
+
+#Plot
+ggplot(data = fp_data,
+       aes(y = study,
+           x = b_cepd,
+           fill = type
+)) +
+  #Add Density plots
+  geom_density_ridges(col = NA,
+                      scale = 0.9, #Slightly decrease size so it fits
+                      alpha = 0.7,
+                      ) +
+    geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set colors
+  scale_fill_manual(values = c("salmon", "lightblue")) +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = "Study") +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.25, 0.5, 1, 2, 4)) +
+  #Set reasonable Y axis limits
+  coord_cartesian(xlim = c(0.25, 4)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold",hjust = 0.0, size = 20),
+        plot.subtitle = element_text(face = "bold", size = 15, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold"),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none",
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm"))
+
+```
+
+```{r message = FALSE}
+##We will now analyze the results of PROTECT TAVR using the results of our previous meta-analysis as input
+
+#First, let us build the data for the PROTECT TAVR trial: Stroke within 30 days; Table 2 from https://doi.org/10.1056/NEJMoa2204961)
+ptavr_data <- data.frame(
+  study = "PROTECTED TAVR", #Trial name
+  total_n = c(1501, 1499), #Total sample size in each group
+  events_n = c(34, 43), #Patients with Stroke in each group
+  cepd = c(1, 0) #CEPD (Yes/No)
+)
+
+#The next steps are as before: first we specify the formula we will be using and then we specify the priors to be used for our analysis
+
+
+#Now, we will write the formula we will use in the regression model
+ptavr_formula <- bf(
+  events_n | trials(total_n) ~ 
+    1 + #Add an intercept to our model (for the baseline risk in the control group) 
+    cepd) #Treatment effect of CEPD
+
+##Now, we will set up our priors (on the log-odds scale)
+
+#Prior for the Treatment effect of CEPD (a normal distribution with a mean of 0 and a standard deviation of 5 implies we do not have any pre-existing information outside these trials for how beneficial or harmful this type of device may be)
+ptavr_cepd_prior <- prior(normal(ma_cepd_lnor, ma_cepd_lnor_sd), class = b, coef = "cepd")
+
+#Prior for the Baseline risk of stroke (this is the same as that used for the meta-analysis).
+stroke_prior <- prior(normal(-3.2, 0.5), class = Intercept)
+
+#Combine these 2 priors into the same object
+ptavr_priors <- c(ptavr_cepd_prior, stroke_prior)
+if(!exists("ptavr_model")) {
+#Run the model incorporating both the prior from the meta-analysis and the data from PROTECT TAVR
+ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = ptavr_priors, #Use the prior based on the meta-analysis
+               stanvars = stanvar(ma_cepd_lnor) + stanvar(ma_cepd_lnor_sd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+#Store a summary of this model
+sum_ptavr_model <- summary(ptavr_model)
+
+#Get the parameters of the row which corresponds to the treatment (CEPD)
+ptavr_cepd_par <- sum_ptavr_model$fixed[rownames(sum_ptavr_model$fixed) == "cepd", ]
+
+
+###We now want to obtain several values of interest
+##First, let us get estimates of treatment effect
+#The log odds ratio
+ptavr_cepd_lnor <- round(ptavr_cepd_par$Estimate, 2)
+#Standard error of the log odds ratio
+ptavr_cepd_lnor_sd <- round(ptavr_cepd_par$Est.Error, 2)
+#The odds ratio
+ptavr_cepd_or <- round(exp(ptavr_cepd_par$Estimate), 2)
+#The lower limit of the 95% credible interval of the odds ratio
+ptavr_cepd_or_lci <- round(exp(ptavr_cepd_par$`l-95% CI`), 2)
+#The upper limit of the 95% credible interval of the odds ratio
+ptavr_cepd_or_uci <- round(exp(ptavr_cepd_par$`u-95% CI`), 2)
+
+
+##Then, we ask the question: what is the posterior probability that CEPD exerts a protective effect? (this corresponds to an odds ratio < 0)
+any_effect <- hypothesis(ptavr_model, #Our model
+           "cepd < 0") #Our question of interest (OR being < 0)
+
+#To facilitate the interpretation of this output for readers, we multiply by 100 (to convert to %) and round to 2 decimal places
+post_prob_any_effect <- round(100*(any_effect$hypothesis$Post.Prob), 2)
+
+
+##We may then ask the question: what is the posterior probability that CEPD exerts a meaningful (clinically relevant) effect?
+
+#To do this, it is first necessary to define a baseline risk without using the device. We will use the baseline risk in the control group, although ideally this risk estimate should be tailored to individual patients.
+baseline_risk <- ptavr_data[ptavr_data$cepd == 0, "events_n"]/ptavr_data[ptavr_data$cepd == 0, "total_n"]
+#Convert to % to make for easier interpretation
+baseline_risk <- baseline_risk
+
+#We must then defined what we would see as the minimum clinically important difference (MCID). This will vary depending on the resources at hand. For demonstrative purposes, let us presume an absolute risk reduction of 1.1 percentage points is of interest.
+mcid <- 0.011
+
+#Therefore, the risk in the intervention arm ought to be:
+lowered_risk <- baseline_risk - mcid
+
+#The formula to convert from risk (probability) to odds is: R / (1 - R)
+baseline_odds <- baseline_risk / (1 - baseline_risk)
+lowered_odds <- lowered_risk / (1 - lowered_risk)
+
+#Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+min_or <- lowered_odds/baseline_odds
+
+##Then, we ask the question: what is the posterior probability that CEPD exerts a meaningful effect? This corresponds to an odds ratio < 0.61. On the log-scale, this corresponds to -0.49
+question <- paste0("cepd < ", log(min_or) )
+
+#We then use the "hypothesis" function from brms to answer our question
+mcid_effect <- hypothesis(ptavr_model, #Our model
+                          hypothesis = question) #Our question of interest (OR being < -0.49)
+
+#To facilitate the interpretation of this output for readers, we multiply by 100 (to convert to %) and round to 2 decimal places
+post_prob_mcid <- round(100*(mcid_effect$hypothesis$Post.Prob), 2)
+
+
+##Now we will do something more useful: We will calculate the probability that CEPD exerts a protective effect for a range of risk reductions ranging from any reduction at all to completely eliminating the risk of stroke
+
+#Range of MCIDs in which we may be interested (from 0% to fully eliminating the baseline risk, 0.01% at a time)
+mcids <- seq(0, baseline_risk, 0.001)
+
+#Set up an empty dataframe to store our probabilities
+cum_postd <- data.frame()
+
+#Set up a loop to replicate the analysis above for every single mcid stored in mcids
+for(mcid in mcids) {
+
+  #Therefore, the risk in the intervention arm ought to be:
+  lowered_risk <- baseline_risk - mcid
+
+  #The formula to convert from risk (probability) to odds is: R / (1 - R)
+  baseline_odds <- baseline_risk / (1 - baseline_risk)
+  lowered_odds <- lowered_risk / (1 - lowered_risk)
+  
+  #Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+  minimum_relevant_or <- lowered_odds/baseline_odds
+  
+  
+  
+  ##Then, we ask the question: what is the posterior probability that CEPD exerts a meaningful effect? (this corresponds to an odds ratio < 0.61). On the log-scale, this corresponds to -0.49
+  question <- paste0("cepd < ", log(minimum_relevant_or))
+  
+  #And we use the hypothesis function to find out
+  effect <- hypothesis(ptavr_model, #Our model
+                       hypothesis = question) #The log-odds ratio to use
+  
+  
+  cum_postd <- rbind(cum_postd, #The empty dataframe we created above
+                     
+                     data.frame( #The dataframe we created using data in this loop
+                       difference = mcid, #The log-odds ratio we used
+                       post_probs = effect$hypothesis$Post.Prob) #The posterior probability
+  )
+  }
+```
+
+```{r message = FALSE}
+
+###The posterior of our model is a combination of information from 2 sources: the prior we fed into our model and the new data from PROTECTED TAVR.
+
+#To see this more explicitly, let us specifically highlight 3 items:
+
+#The prior for the effectiveness of CEPD (expressed on the log-odds scale), which was obtained from our meta-analysis, is a normal distribution. 
+
+#Like any normal distribution, it is described using 2 parameters: the mean (-0.02) and a standard deviation (0.35)
+
+#Let's simulate a normal distribution with these parameters to see what this looks like
+setseed(100)
+prior_sim <- rnorm(n = 10000, #Number of simulations
+      mean = ma_cepd_lnor, #The log-OR from our meta-analysis
+      sd = ma_cepd_lnor_sd) #The standard error of the log-OR from our meta-analysis
+
+
+#The new data on the effect of CEPD from PROTECTED TAVR (The "Likelihood") can also be expressed as a normal distribution. Like the prior which was also represented using a normal distribution, it will have a mean (representing the OR) and a standard deviation.
+
+##We will calculate these values manually:
+#To get the odds ratio, first calculate the odds of a stroke in the CEPD arm:
+cepd_arm_odds <- ptavr_data$events_n[ptavr_data$cepd == 1]/(ptavr_data$total_n[ptavr_data$cepd == 1] - ptavr_data$events_n[ptavr_data$cepd == 1])
+#Then, calculate the odds of a stroke in the control arm:
+control_arm_odds <- ptavr_data$events_n[ptavr_data$cepd == 0]/(ptavr_data$total_n[ptavr_data$cepd == 0] - ptavr_data$events_n[ptavr_data$cepd == 0])
+
+#The odds ratio is obtained by dividing these 2 odds by one another
+newdata_or <- round(cepd_arm_odds/control_arm_odds, 2)
+
+#Let us convert to the log scale 
+newdata_lnor <- log(newdata_or)
+
+#We have the mean for our normal distribution. We now need to calculate the standard deviation. This is obtained by the formula SD = sqrt(1/a + 1/b + 1/c + 1/d)
+newdata_lnor_sd <- round(sqrt(
+  1/ptavr_data$total_n[ptavr_data$cepd == 1] +
+  1/ptavr_data$total_n[ptavr_data$cepd == 0] +  
+  1/ptavr_data$events_n[ptavr_data$cepd == 1] +
+  1/ptavr_data$events_n[ptavr_data$cepd == 0]
+  ),
+  2)
+
+#Now we have the SD of our normal distribution as well. We can therefore easily simulate the likelihood function for the data from the PROTECTED TAVR trial as follows:
+setseed(100)
+ptavr_sim <- rnorm(n = 10000,
+                   mean = newdata_lnor,
+                   sd = newdata_lnor_sd)
+
+##We can also simulate the normal distribution for our posterior using the model parameters obtained from the "ptavr_model" object above
+setseed(100)
+post_sim <- rnorm(n = 10000,
+                  mean = ptavr_cepd_lnor,
+                  sd = ptavr_cepd_lnor_sd)
+
+##Let us recap the 3 distributions we now have:
+# "prior_sim", which contains our prior (obtained from the meta-analysis)
+# "ptavr_sim" which contains the data from the PROTECTED TAVR trial
+# "post_sim" which contains the data from our posterior (the combination of the above 2)
+
+#In the next code block, we will proceeed to plot these 3 distributions to give a conceptual overview of what the model-fitting process looks like under the hood.
+```
+
+# **Analyzing PROTECTED TAVR in light of prior evidence**
+
+The results of our updated analysis incorporating both the prior evidence and data from PROTECT TAVR is shown in **Figure 2**. The prior estimate (based on the meta-analysis and colored in red) is combined with the likelihood (representing new data from the PROTECTED TAVR trial and colored in green) to produce the posterior estimate (reflecting the combination of our prior evidence with the new data and colored in blue). Our updated estimate is an odds ratio of `r ptavr_cepd_or` (95% credible interval: `r ptavr_cepd_or_lci` to `r ptavr_cepd_or_uci`). As can be readily seen in the figure, the posterior represents a compromise between our prior knowledge and the results of the trial. Our meta-analysis-based prior was centered on (that is, *had a point estimate of*) an odds ratio of `r ma_cepd_or`, the trial-based estimate was centered on an odds ratio of `r newdata_or`, and the posterior is centered on an odds ratio of `r ptavr_cepd_or`.
+
+The width of the distributions seen in the figure also reflects the state of certainty (or uncertainty) in the effectiveness of CEP devices. The prior, because it was based on a meta-analysis of 6 relatively small studies, has the greatest width (formally reflected by its greater standard deviation, which was `r ma_cepd_lnor_sd` on the log-scale). The PROTECT TAVR trial estimate carried less uncertainty as it was larger than all 6 trials combined, and this is reflected by the smaller width of its distribution (formally represented by a lower standard deviation of `r newdata_lnor_sd`). The posterior, reflecting the synthesis of these 2 estimates, has the smallest width (formally represented by the lowest standard deviation of `r ptavr_cepd_lnor_sd`). This process reflects the cumulative nature of knowledge related to this device (and to medical interventions more generally) in that one synthesizes prior knowledge (subject to some uncertainty) and current trial data (also subject to some uncertainty) to produce posterior knowledge (subject to lesser uncertainty than either the prior or the trial). Eventually, if/when more trials are conducted on these devices, the posterior estimates presented herein will then be used by a future analyst as they attempt to interpret future trial data. In other words, today's posteriors are tomorrow's priors.
+
+A key aspect that is important to appreciate is the influence of the prior on the analysis. In this scenario, because the prior knowledge had a greater state of uncertainty than the data provided by PROTECT TAVR (as evidenced by the smaller standard deviation in the latter), the posterior resembles PROTECT TAVR more than it resembles the prior. This may not always be the case for assessments of other interventions, particularly if there's a rich body of pre-existing evidence or if the new trial is small.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+
+###Figure 2
+
+#First, let us create a dataframe containing the above 3 simulations
+sims <- data.frame(sim_lnor = c(prior_sim, ptavr_sim, post_sim), #This column contains the results of our simulations (each of length 10,000)
+           sim_type = rep(c("Prior", "Likelihood", "Posterior"), each = 10000) #This column contains the labels of these simulations so we can identify which simulation each row belongs to
+           )
+
+#Arrange sim_type so that it shows up with the prior on top, the posterior at the bottom, and likelihood in the middle.
+sims$sim_type <- factor(sims$sim_type, levels = c("Posterior", "Likelihood", "Prior"))
+
+#Create title and subtitles for the plot
+main_title <- "Figure 2: Synthesis of the prior and likelihood to generate the posterior estimate of the effectiveness of CEPD"
+subtitle <- "Prior evidence is based on a meta-analysis of 6 RCTs testing filter-based CEPD devices. The likelihood is based on the data from the PROTECTED TAVR trial. The posterior is the synthesis of the two."
+
+
+#Now, let us visualize this:
+#Plot
+ggplot(data = sims,
+       aes(y = sim_type,
+           x = exp(sim_lnor),
+           fill = sim_type
+       )) +
+  #Add Density plots
+  stat_halfeye(alpha = 0.7, .width = 0.95) +
+  #Set colors
+  scale_fill_manual(name = "Information source:",
+                    values = c("lightblue", "darkolivegreen", "salmon")) +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set x-axis limit
+  coord_cartesian(xlim = c(0.4, 2.5)) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = NULL, expand = c(0, 0.03)) +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.5, 1, 2)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+```
+
+# **Converting treatment effects to meaningful clinical quantities**
+
+The resulting posterior distribution of treatment effects can provide several answers to questions frequently asked by clinicians. Clinicians frequently ask: "What is the probability that this intervention will reduce the risk of stroke?". We can answer that directly from **Figure 3**. The probability of any risk reduction at all is `r post_prob_any_effect`%. It is also often the case that patients, clinicians, and policymakers are interested in a more important question: What is the probability that the intervention will reduce the risk of stroke by an important (clinically relevant) degree?". Defining this minimal clinically relevant difference (MCID) requires both clinical expertise and a consideration of the available resources and competing priorities. For illustrative purposes, we use an MCID of 1.1% previously identified by a survey of stroke experts. We calculate the probability of a risk reduction greater than 1.1% to be `r cum_postd[cum_postd$difference == 0.011, "post_probs"]*100`%. Therefore, one may interpret the results of our analysis as indicating that CEP devices more likely than not reduce the risk of post-procedural stroke; however, it is quite unlikely that CEP devices offer clinically meaningful stroke risk reductions.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+
+###Figure 3
+
+
+#Create title and subtitles for the plot
+main_title <- "Figure 3: Cumulative posterior probabilities of absolute risk reductions of stroke"
+subtitle <- "This graph is a function of two variables: baseline risk (which was obtained from the control group in PROTECTED TAVR) and treatment effect (the posterior estimate of the odds ratio).\nThe dashed line at 1.1% indicates the (proposed) minimum clinically relevant difference."
+
+
+#Now, let us visualize this:
+#Plot
+ggplot(data = cum_postd,
+       aes(y = post_probs*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           x = difference*100 #Multiply by 100 to convert to % (to facilitate interpretation)
+       )) +
+  #Add Density plots
+    #Add Density plots
+  geom_area(fill = "lightblue",
+            alpha = 0.7) +
+  #Set colors
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  #Plot a vertical line at a MCID of 1.1%
+  geom_vline(xintercept = 1.1, color = "black", 
+             lwd = 0.75, linetype = 2) +
+  #X and Y axes aesthetics
+  scale_y_continuous(name = "Probability of reducing risk by X percentage points or more (%)", 
+                     expand = c(0, 0),
+                     breaks = seq(20, 100, 20)) +
+  scale_x_continuous(name = "Absolute risk reduction (percentage points)",
+                     expand = c(0, 0),
+                     breaks = seq(0, 3, 0.5)) +
+  #Set coordinate limits
+  coord_cartesian(ylim = c(0, 100)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none"
+        )
+```
+
+# **Using Bayesian analyses to inform personalized treatment decisions**
+
+It is important to note that these numbers were based on a certain baseline risk (namely, the baseline risk in the control arm of the PROTECT TAVR trial, which was `r round(baseline_risk*100, 2)`%). It may not be appropriate to assume this baseline risk for every patient encounter. In general, for any risk-reducing intervention, the absolute risk reduction is proportional to the baseline risk. For example, if a well-validated prediction model assesses the patient's risk of stroke as being 1%, the probability of a meaningful benefit would be lower. On the other hand, a predicted stroke risk of 5% would yield a higher probability of the device exerting a meaningful benefit.
+
+```{r}
+
+##To facilitate the calculation of meaningful risk reductions in stroke across different risk levels. We will convert the for loop we created above to a function that can incorporate our baseline risks of interest and the MCIDs of interest
+
+
+#For a user-specified baseline risk and a user-specified minimum reduction in stroke risk, calculate the probability of reducing stroke risk by that much.
+
+calculate_cum_post_prob <- function(baseline_risks, mcids, brm_model) {
+  
+  #Set up an empty dataframe to store our probabilities
+  cum_post_probs_df <- data.frame()
+  
+  #Set up a for loop to replicate the analysis below for every baseline risk of interest
+  
+  for(baseline_risk in baseline_risks) {
+    
+    #Set up a (nested) for loop to replicate the analysis below for every single mcid stored in mcids
+    for(mcid in mcids[mcids < baseline_risk]) {
+      
+      #Therefore, the risk in the intervention arm ought to be:
+      lowered_risk <- baseline_risk - mcid
+      
+      #The formula to convert from risk (probability) to odds is: R / (1 - R)
+      baseline_odds <- baseline_risk / (1 - baseline_risk)
+      lowered_odds <- lowered_risk / (1 - lowered_risk)
+      
+      #Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+      minimum_relevant_or <- lowered_odds/baseline_odds
+      
+      
+      ##Then, we ask the question: what is the posterior probability that CEPD exerts a meaningful effect? (this corresponds to an odds ratio < 0.61). On the log-scale, this corresponds to -0.49
+      question <- paste0("cepd < ", log(minimum_relevant_or))
+      
+      #And we use the hypothesis function to find out
+      effect <- hypothesis(brm_model, #Our model
+                           hypothesis = question) #The log-odds ratio to use
+      
+      
+      cum_post_probs_df <- rbind(cum_post_probs_df, #The empty dataframe we created above
+                         
+                         data.frame( #The dataframe we created using data in this loop
+                           difference = mcid, #The user-specified MCID
+                           post_probs = effect$hypothesis$Post.Prob, #The posterior probability as returned by the model
+                           baseline_risk = baseline_risk) #The user-specified baseline risk
+      )
+    }
+  }
+  #Return the output
+  cum_post_probs_df
+}
+
+
+
+#Calcualte the probability of benefit across 5 different baseline risks and store them
+ard_probabilities <- calculate_cum_post_prob(baseline_risks = seq(0.01, 0.1, 0.01), #5 baseline risks ranging from 1 to 5%
+                        mcids = seq(0, 0.05, 0.001), #Spectrum of risk differences
+                        brm_model = ptavr_model) #Our model
+```
+
+**Figure 4** shows the probabilities of benefit under different baseline risks. For example, the probability that a patient with a low baseline risk of 1% would derive a meaningful benefit is `r round(100 * ard_probabilities[ard_probabilities$difference == 0.011 & ard_probabilities$baseline_risk == 0.02, "post_probs"], 2)`%. In contrast, the probability that a patient at a higher baseline risk of 10% would derive meaningful benefit is `r round(100 * ard_probabilities[ard_probabilities$difference == 0.011 & round(ard_probabilities$baseline_risk, 2) == 0.1, "post_probs"], 2)`%. In this way, a Bayesian analysis can not only provide the probability that an intervention offers a meaningful benefit in a trial population, but also the probability that individual patients will derive meaningful benefits from an intervention according to their own personal risk.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+###Figure 4
+
+#Create title and subtitles for the plot
+main_title <- "Figure 4: Cumulative posterior probabilities of absolute risk reductions of stroke across different levels of risk"
+subtitle <- "This graph is a function of two variables: baseline risk (which varies from 0 to 5%) and treatment effect (the posterior estimate of the odds ratio).\nThe dashed line at 1.1% indicates the (proposed) minimum clinically relevant difference."
+
+
+#Now, let's plot our results:
+ggplot(data = ard_probabilities,
+       aes(y = post_probs*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           x = difference*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           color = factor(baseline_risk*100),
+           group = baseline_risk
+       )) +
+  #Add Density plots
+    #Add Density plots
+  geom_line(linewidth = 1.25) +
+  #Set colors
+  scale_color_tableau(name = "Baseline risk (%)") +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  #Plot a vertical line at a MCID of 1.1%
+  geom_vline(xintercept = 1.1, color = "black", 
+             lwd = 0.75, linetype = 2) +
+  #X and Y axes aesthetics
+  scale_y_continuous(name = "Probability of reducing risk by X percentage points or more (%)", 
+                     expand = c(0, 0),
+                     breaks = seq(20, 100, 20)) +
+  scale_x_continuous(name = "Absolute risk reduction (percentage points)",
+                     expand = c(0, 0),
+                     breaks = seq(0, 5, 0.5)) +
+  #Set limits on the Y-axis
+  coord_cartesian(ylim = c(0, 100)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.title = element_text(size = 20, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        ) +
+  guides(color = guide_legend(nrow = 1))
+```
+
+# **Incorporation of high-quality observational data**
+
+In the above analyses, all of our data was informed by randomized clinical trials (RCTs), which, when well-done, represent the highest level of evidence for assessments of treatment effects. In some cases, an analyst may believe that a very well-done observational study also merits incorporation into their priors. In the case of CEP devices, a well-done analysis observational analysis utilizing registry-based data showed an odds ratio of 0.82 (with a standard error of 0.087 on the log scale) for the association between CEP devices and in-hospital stroke.
+
+However, in integrating this observational evidence, the analyst may also wish to acknowledge the greater uncertainty inherent in an observational study's estimate of the treatment effect (compared to an RCT) due to its susceptibility to confounders. The question then arises: "How do we incorporate high-quality observational data while acknowledging its inherent limitations and the unreliability of estimated treatment effects compared to the golden standard of randomized clinical trials?".
+
+Recall that treatment effects are typically represented using a normal distribution, which is described using a mean (centered on the study's point estimate of the treatment effect) and a standard deviation (representing the uncertainty in that study's estimate of the treatment effect). In order to acknowledge the increased risk of uncertainty present in observational studies, one can multiply the standard deviation by a penalty factor. A penalty factor of 1 implies no penalty at all (that estimates from observational studies are as reliable as those from randomized clinical trials). Higher penalties imply greater skepticism in observational studies. **Figure 5** shows the distribution of treatment effects from this registry-based analysis under no and increasingly harsh penalties. Note that the width of the distribution is smallest for the unpenalized estimate and largest for the most highly penalized estimate.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+
+##We will plot normal distributions of the treatment effect estimates obtained by Butala et al. under varying penalties.
+
+#First, define a vector of penalties (where 1 implies no penalty and larger values imply increasingly larger penalties)
+penalties <- c(1, 2, 5, 10)
+
+#Create an empty dataframe to store the results of an upcoming for loop
+obs_estimates <- data.frame()
+
+for(penalty in penalties) {
+setseed(100)
+obs_est <- rnorm(n = 10000, #Number of simulations
+      mean = log(0.82), #The log-OR from the study (Propensity-matched analysis from Table 3 at https://doi.org/10.1161/CIRCULATIONAHA.120.052874)
+      sd = 0.087*penalty) #The standard error of the log-OR from the study (calculated using the width of the 95% CI on the log scale divided by 3.92)
+obs_estimates <- rbind(obs_estimates,
+      data.frame(
+        estimate = obs_est,
+        penalty = penalty
+      ))
+}
+
+#Rename the penalties column
+obs_estimates$penalty[obs_estimates$penalty == 1] <- "1 (no penalty)"
+obs_estimates$penalty[obs_estimates$penalty == 2] <- "2 (smaller penalty)"
+obs_estimates$penalty[obs_estimates$penalty == 5] <- "5 (larger penalty)"
+obs_estimates$penalty[obs_estimates$penalty == 10] <- "10 (highest penalty)"
+
+#Convert it to a factor to ensure correct ordering in ggplot2
+obs_estimates$penalty <- factor(obs_estimates$penalty, levels = c("1 (no penalty)", "2 (smaller penalty)", "5 (larger penalty)", "10 (highest penalty)"))
+
+#Create title and subtitles for the plot
+main_title <- "Figure 5: Implications of different penalties for observational studies."
+subtitle <- "This plot shows the implications of using different penalty factors to downgrade the vidence of treatment effects derived from an observational study.\nThe solid black line represents the 95% confidence interval under each penalty, and is accordingly widest for the greatest penalty."
+
+
+##Now, we will visualize these estimates
+#Plot:
+ggplot(data = obs_estimates,
+       aes(y = factor(penalty),
+           x = exp(estimate),
+           fill = factor(penalty)
+       )) +
+  #Add Density plots
+  stat_halfeye(alpha = 1, .width = 0.95, fatten_point = 4, normalize = "xy") +
+  #Set colors
+  scale_fill_tableau(name = "Penalty factor") +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set x-axis limit
+  coord_cartesian(xlim = c(0.1, 10)) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = NULL, expand = c(0, 0.1)) +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.1, 0.2, 0.5, 1, 2, 5, 10),
+                     expand = c(0, 0.1)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 1),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+```
+
+```{r, message = FALSE}
+#We will now formally update the prior obtained from our meta-analysis with the data from the observational study by Butala et al. We do not have access to patient-level data from their propensity-matched analysis so we will not be able to recreate dataframes and use logistic regression. Instead, we will directly use their estimates of treatment effect (odds ratios on the log scale).
+
+##Although we could use the brms package to estimate parameters based on MCMC simulation, we will use this analysis as an opportunity to demonstrate how to obtain posterior distributions using a quicker mode of estimation that can be applied if certain assumptions are met.
+
+##Because our prior is represented as a normal distribution and so is our posterior, they are said to be "conjugate" (having the same family of probability distributions). This allows the use of closed-form mathemetical calculations to derive the posterior rather than relying on simulation. The primary advantage to this is computational speed.
+
+#We will use the NormalNormalPosterior function from the "bpp" package to do this. We will also provide (further below) an example of how to do this manually
+
+#Posterior under no penalty for observational studies
+no_pen_post <- NormalNormalPosterior(datamean = log(0.82), 
+                      sigma = 0.087*1,
+                      n = 1,
+                      nu = ma_cepd_lnor,
+                      tau = ma_cepd_lnor_sd)
+
+#Posterior under small penalty for observational studies
+small_pen_post <- NormalNormalPosterior(datamean = log(0.82), 
+                      sigma = 0.087*2,
+                      n = 1,
+                      nu = ma_cepd_lnor,
+                      tau = ma_cepd_lnor_sd)
+
+#Posterior under large penalty for observational studies
+large_pen_post <- NormalNormalPosterior(datamean = log(0.82), 
+                      sigma = 0.087*5,
+                      n = 1,
+                      nu = ma_cepd_lnor,
+                      tau = ma_cepd_lnor_sd)
+
+#Posterior under highest penalty for observational studies ("highest" here refers to highest within the context of this analysis)
+highest_pen_post <- NormalNormalPosterior(datamean = log(0.82), 
+                      sigma = 0.087*10,
+                      n = 1,
+                      nu = ma_cepd_lnor,
+                      tau = ma_cepd_lnor_sd)
+
+###An example of how to obtain the posterior manually (assuming a "small" penalty):
+
+#First, we will calculate the variance in both types of studies (the variance is simply the square of the standard deviation)
+meta_var <- (ma_cepd_lnor_sd^2)
+obs_var <- ((2 * 0.087)^2)
+
+#We will then store the treatment effect obtained from the meta-analysis and the treatment effect from the observational study within appropriately named vectors
+meta_ttt <- ma_cepd_lnor
+obs_ttt <- log(0.82)
+
+#The mean is the sum of two parts: one contribution comes from the observational studty and the other from our meta-analysis (as can be observed from the formulas, estimates with lower variance/uncertainty are rewarded with a greater share of contribution to the mean)
+obs_contribution <- (meta_var/(obs_var + meta_var))*obs_ttt
+meta_contribution <- (obs_var/(meta_var + obs_var))*meta_ttt
+
+#The new posterior mean is simply the sum of these two parts
+conj_normal_mean <- obs_contribution + meta_contribution
+
+#The new posterior standard deviation is as follows (and, as can be seen, is necessarily smaller than either standard deviation alone):
+conj_normal_sd <- sqrt(1/((1/obs_var) + (1/meta_var)))
+
+#Verify that the manual calculation obtains identical results to the function used above
+if(small_pen_post$postmean != conj_normal_mean) {"Unexpected difference between manual calculation and NormalNormalPosterior!"}
+if(small_pen_post$postsigma != conj_normal_sd) {"Unexpected difference between manual calculation and NormalNormalPosterior!"}
+###End of manual calculation section
+
+
+###Now, we will redo our re-analysis of PROTECTED TAVR using the new priors incorporating observational evidence
+
+#Now, we will reuse the same formula as before
+ptavr_formula <- bf(
+  events_n | trials(total_n) ~ 
+    1 + #Add an intercept to our model (for the baseline risk in the control group) 
+    cepd) #Treatment effect of CEPD
+
+
+##We will now form 4 sets of priors, each corresponding to the different penalties imposed
+
+#Under no penalty
+no_pen_post_postmean <- no_pen_post$postmean
+no_pen_post_postsd <- no_pen_post$postsigma
+no_pen_prior <- prior(normal(no_pen_post_postmean, no_pen_post_postsd), class = b, coef = "cepd")
+
+#Under a small penalty
+small_pen_post_postmean <- small_pen_post$postmean
+small_pen_post_postsd <- small_pen_post$postsigma
+small_pen_prior <- prior(normal(small_pen_post_postmean, small_pen_post_postsd), class = b, coef = "cepd")
+
+#Under a larger penalty
+large_pen_post_postmean <- large_pen_post$postmean
+large_pen_post_postsd <- large_pen_post$postsigma
+large_pen_prior <- prior(normal(large_pen_post_postmean, large_pen_post_postsd), class = b, coef = "cepd")
+
+#Under th highest penalty
+highest_pen_post_postmean <- highest_pen_post$postmean
+highest_pen_post_postsd <- highest_pen_post$postsigma
+highest_pen_prior <- prior(normal(highest_pen_post_postmean, highest_pen_post_postsd), class = b, coef = "cepd")
+
+
+if(!exists("no_pen_ptavr_model")) {
+#Run the model incorporating both the prior from the meta-analysis and the data from PROTECT TAVR
+no_pen_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = no_pen_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(no_pen_post_postmean) + stanvar(no_pen_post_postsd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+if(!exists("small_pen_ptavr_model")) {
+#Run the model incorporating both the prior from the meta-analysis and the data from PROTECT TAVR
+small_pen_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = small_pen_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(small_pen_post_postmean) + stanvar(small_pen_post_postsd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+
+if(!exists("large_pen_ptavr_model")) {
+#Run the model incorporating both the prior from the meta-analysis and the data from PROTECT TAVR
+large_pen_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = large_pen_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(large_pen_post_postmean) + stanvar(large_pen_post_postsd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+if(!exists("highest_pen_ptavr_model")) {
+#Run the model incorporating both the prior from the meta-analysis and the data from PROTECT TAVR
+highest_pen_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = highest_pen_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(highest_pen_post_postmean) + stanvar(highest_pen_post_postsd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+##Obtain posterior probability of effect under the 4 models
+#No penalty
+no_penalty_prob_any_effect <- hypothesis(no_pen_ptavr_model,
+                                         "cepd < 0")
+no_penalty_prob_any_effect <- round(no_penalty_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Small penalty
+small_penalty_prob_any_effect <- hypothesis(small_pen_ptavr_model,
+                                         "cepd < 0")
+small_penalty_prob_any_effect <- round(small_penalty_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Large penalty
+large_penalty_prob_any_effect <- hypothesis(large_pen_ptavr_model,
+                                         "cepd < 0")
+large_penalty_prob_any_effect <- round(large_penalty_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Highest penalty
+highest_penalty_prob_any_effect <- hypothesis(highest_pen_ptavr_model,
+                                         "cepd < 0")
+highest_penalty_prob_any_effect <- round(highest_penalty_prob_any_effect$hypothesis$Post.Prob*100, 2)
+```
+
+**Figure 6** shows the implications of incorporating the observational data under different penalties to the original prior we used and the resulting posterior estimate. Note that in all 4 scenarios, the likelihood (denoting the data from PROTECTED TAVR) remains identical. However, the posterior estimates are different. The most favorable and most certain estimates of treatment effect are obtained when we apply no penalty at all to observational data (which is likely a naive and overly optimistic assumption). In that scenario, it would be near-certain that CEP devices have a protective effect (posterior probability of any effect: `r no_penalty_prob_any_effect`%). On the end of the spectrum is the highest penalty imposed on observational studies (which multiples their standard error by 10), wherein the posterior probability of any benefit is nearly identical to that observed in the original analyses incorporating RCTs only (posterior probability of any effect: `r highest_penalty_prob_any_effect`%). The other 2 scenarios inbetween, denoted by the "small" and "large" penalties in the figures, show posterior probabilities of `r small_penalty_prob_any_effect`% and `r large_penalty_prob_any_effect`%).
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+###We will now plot a figure combining the priors under the 4 scenarios, the data from PROTECTED TAVR, and the resulting posteriors. This will allow us to appreciate the impact of different assumptions regarding the reliability (and consequent penalties imposed on) of observational studies.
+
+
+##First, we need to extract the data for the distribution of treatment effects under the 4 priors. Recall that we have already done this and the dataframe is stored as "obs_estimates". 
+penalties_prior_estimates <- obs_estimates
+#We will just modify this dataframe to denote that this is the prior incorporating observational data ("\n" is added to add linebreaks to the label since it's lengthy)
+penalties_prior_estimates$estimate_type <- "Prior\nincorporating\nobservational\ndata"
+#We will also rename the factor levels in the penalty column for aesthetic purposes
+levels(penalties_prior_estimates$penalty) <- c("No penalty", "Smaller penalty", "Larger penalty", "Highest penalty")
+
+#Then, we will simulate the data for the treatment effect observed in PROTECTED TAVR under a normal distribution. Again, recall that we have already done this in "ptavr_sim". We will simply store this in a dataframe
+penalties_ptavr_estimates <- data.frame(estimate = ptavr_sim, estimate_type = "Likelihood\nbased on\nPROTECTED TAVR")
+
+#We will then repeat this dataframe 4 times (once for each type of penalty, since the data from PROTECTED TAVR is the same regardless)
+penalties_ptavr_estimates <- rbind(penalties_ptavr_estimates %>% mutate(penalty = "No penalty"),
+      penalties_ptavr_estimates %>% mutate(penalty = "Smaller penalty"),
+      penalties_ptavr_estimates %>% mutate(penalty = "Larger penalty"),
+      penalties_ptavr_estimates %>% mutate(penalty = "Highest penalty"))
+
+
+##Finally, we will extract data from the 4 posteriors
+#We will use a foreach loop. This is similar to the for loop used above but allows us to loop over 2+ variables at once and can automatically combine the output in a dataframe.
+penalties_post_estimates <- foreach(model = list(no_pen_ptavr_model, small_pen_ptavr_model, large_pen_ptavr_model, highest_pen_ptavr_model),
+                                penalty = c("No penalty", "Smaller penalty",
+                                            "Larger penalty", "Highest penalty"),
+                                .combine = "rbind") %do% {
+draws <- as_draws(model, "b_cepd") %>% unlist
+data.frame(estimate = draws,
+           penalty = penalty,
+           estimate_type = "Posterior")
+                                }
+
+##Now, we will combine the above into a single dataframe
+penalties_estimates <- rbind(penalties_prior_estimates, penalties_ptavr_estimates, penalties_post_estimates)
+
+#We will change the estimate type to a factor to ensure correct ordering in the plot
+penalties_estimates$estimate_type <- factor(penalties_estimates$estimate_type, levels = c("Posterior", "Likelihood\nbased on\nPROTECTED TAVR", "Prior\nincorporating\nobservational\ndata"))
+
+#Create title and subtitles for the plot
+main_title <- "Figure 6: Posterior estimates of the effectiveness of CEPD under different penalties for observational data"
+subtitle <- "Different penalties for estimates obtained from observational studies are used to update our original prior based on a meta-analysis of RCTs. The likelihood represents data from PROTECTED TAVR. \nPenalties are imposed by multiplying the standard deviation of treatment effects from the observational study by 1 (no penalty), 2 (small penalty), 5 (larger penalty), and 10 (highest penalty)."
+
+#Now, we will plot
+ggplot(data = penalties_estimates,
+       aes(y = estimate_type,
+           x = exp(estimate),
+           fill = estimate_type
+       )) +
+  #Add Density plots
+  stat_halfeye(alpha = 1, .width = 0.95, fatten_point = 4, normalize = "xy") +
+  #Facet by penalty type
+  facet_grid(cols = vars(penalty)) +
+  #Set colors
+  scale_fill_tableau(name = "Penalty factor") +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set x-axis limit
+  coord_cartesian(xlim = c(0.1, 10)) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = NULL, expand = c(0, 0.1)) +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.2, 1, 5),
+                     expand = c(0, 0.1)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+```
+
+Accordingly, the degree of certainty one has in the protective benefit of CEP devices is proportional to the trust one has in the estimates obtained from the observational study. It is outside the scope of this work to determine what an appropriate degree of trust (and consequent penalty) is, or indeed whether observational data should be incorporated at all. We merely provide a framework for practitioners of evidence to incorporate observational data if they deem it to be of a high enough quality. If observational data is incorporated, it is critical to show the impact of different assumptions regarding the reliability of observational studies on the posterior estimates. It is important to note that the above principle is not necessarily limited to observational studies. For example, if a randomized clinical trial is felt to be of low quality due to issues in its design or tests an intervention that has a somewhat different design from the intervention at hand, then the same principle can be applied to downgrade the related evidence.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+##We will now build a skeptical prior (probability of a meaningful absolute difference < 10%) and an enthusiastic prior (probability of)
+
+
+#The skepitcal mean is centered on 0
+skepitcal_prior_mean <- 0
+#Find the SD of a normal distribution with a mean 0 such that the probability of a clinically meaningful benefit (ARR > or equal to 1.1% corresponding to an OR of 0.61 or less as previously shown) is 10%.
+#"qnorm" returns how many SDs away from the mean (in a normal distribution with a mean 0 and an SD of 1) you would need to be to for a probability of 10%. Divide the minimum-relevant OR (logged) by this to return the SD you need for your skeptical normal prior (also with a mean of 0) to return a probability of 10%.
+skeptical_prior_sd <- log(min_or)/qnorm(0.1)
+
+#Create your skeptical prior
+skeptical_prior <- prior(normal(skepitcal_prior_mean, skeptical_prior_sd))
+
+#The enthusiastic mean is centered on the minimal clinically relevant difference (in this case, the OR corresponding to said difference)
+enthusiastic_prior_mean <- log(min_or)
+
+#The enthusiastic SD gives a 70% probability of benefit (versus 30% of harm) and a 50% probability of the difference being equal or greater than the MCID (versus 50% probability of differene being lower than the MCID, either a trivial benfit or harm)
+#To retrieve the corresponding SD, we will use the same approach as above
+enthusiastic_prior_sd <- enthusiastic_prior_mean/qnorm(0.30)
+
+#Create your enthusiastic prior
+enthusiastic_prior <- prior(normal(enthusiastic_prior_mean, enthusiastic_prior_sd))
+
+#Our pessimistic prior is the mirror opposite of our enthusiastic prior. Meaning it has a mean for the log-OR that is -1*mean under the enthusisatic prior and the same standard deviation to convey the same amount of uncertainty
+pessimistic_prior_mean <- -1*enthusiastic_prior_mean
+pessimistic_prior_sd <- enthusiastic_prior_sd
+pessimistic_prior <- prior(normal(pessimistic_prior_mean, pessimistic_prior_sd))
+
+##Let us construct a "noninf/non-informative" prior (do note that the term "weakly informative" is subject to some controversy as the strength/weakness of a prior is generally relative to the data/likelihood)
+#This will be done using a normal distribution at a mean of 0 and with a large SD of 10. This allows relatively large probabilities of extremely large (and unrealistic) treatment effects. It is (roughly) equivalent to allowing the data/likelihood to completely dictate your posterior as you discard all prior knowledge as irrelevant to assessing the results of PROTECTED TAVR.
+noninf_prior_mean <- 0
+noninf_prior_sd <- 20
+
+#Create your noninf/weakly-informative prior
+noninf_prior <- prior(normal(noninf_prior_mean, noninf_prior_sd))
+
+#Now, we will reuse the same formula as before
+ptavr_formula <- bf(
+  events_n | trials(total_n) ~ 
+    1 + #Add an intercept to our model (for the baseline risk in the control group) 
+    cepd) #Treatment effect of CEPD
+
+
+##Now, we will perform the analysis using the skeptical and enthusiastic prior.
+
+if(!exists("skeptical_ptavr_model")) {
+#Run the model incorporating the data from PROTECT TAVR under a skepitcal prior
+skeptical_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = skeptical_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(skepitcal_prior_mean) + stanvar(skeptical_prior_sd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+if(!exists("enthusiastic_ptavr_model")) {
+#Run the model incorporating the data from PROTECT TAVR under an enthusiastic prior
+enthusiastic_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = enthusiastic_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(enthusiastic_prior_mean) + stanvar(enthusiastic_prior_sd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+if(!exists("pessimistic_ptavr_model")) {
+#Run the model incorporating the data from PROTECT TAVR under a pessimistic prior
+pessimistic_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = pessimistic_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(pessimistic_prior_mean) + stanvar(pessimistic_prior_sd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+if(!exists("noninf_ptavr_model")) {
+#Run the model incorporating the data from PROTECT TAVR under a noninf prior
+noninf_ptavr_model <- brm(data = ptavr_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ptavr_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = noninf_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(noninf_prior_mean) + stanvar(noninf_prior_sd) #We pass the variable names used in our priors here so that Stan recognizes them
+               )
+}
+
+
+##Obtain posterior probability of effect under the 2 models
+#Skeptic
+skeptical_prob_any_effect <- hypothesis(skeptical_ptavr_model,
+                                         "cepd < 0")
+skeptical_prob_any_effect <- round(skeptical_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_any_effect <- hypothesis(enthusiastic_ptavr_model,
+                                         "cepd < 0")
+enthusiastic_prob_any_effect <- round(enthusiastic_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Pessimistic
+pessimistic_prob_any_effect <- hypothesis(pessimistic_ptavr_model,
+                                         "cepd < 0")
+pessimistic_prob_any_effect <- round(pessimistic_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_any_effect <- hypothesis(noninf_ptavr_model,
+                                         "cepd < 0")
+noninf_prob_any_effect <- round(noninf_prob_any_effect$hypothesis$Post.Prob*100, 2)
+##Obtain posterior probability of important effect under the 2 models
+#Skeptic
+skeptical_prob_imp_effect <- hypothesis(skeptical_ptavr_model,
+                                         paste0("cepd < ", log(min_or)))
+skeptical_prob_imp_effect <- round(skeptical_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_imp_effect <- hypothesis(enthusiastic_ptavr_model,
+                                         paste0("cepd < ", log(min_or)))
+enthusiastic_prob_imp_effect <- round(enthusiastic_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+#Pessimistic
+pessimistic_prob_imp_effect <- hypothesis(pessimistic_ptavr_model,
+                                         paste0("cepd < ", log(min_or)))
+pessimistic_prob_imp_effect <- round(pessimistic_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_imp_effect <- hypothesis(noninf_ptavr_model,
+                                         paste0("cepd < ", log(min_or)))
+noninf_prob_imp_effect <- round(noninf_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+```
+
+# **Approaches to formulating priors in the absence of data**
+
+Thus far, we have analyzed the evidence offered by PROTECTED TAVR in light of previous data from a meta-analysis of preceding RCTs and data from a high-quality observational study. In some cases, no such data may be available (or the data may be deemed low-quality or irrelevant) and the analyst may have to use priors without relying on these sources. We will now re-analyze the data using skeptical, non-informative, and enthusiastic priors. it is instructive to juxtapose these 3 frameworks both to show how they may be conducted analytically and to show the different implications of adopting each view.
+
+***Constructing skeptical priors***
+
+Skeptical priors correspond to views that most treatments do not exert large effects and are close to zero. They may be justified on the grounds that most interventions we study do not exert clinically relevant effects and that therefore our framework in interpreting data on treatment effects should be conservative and cautious.
+
+Formally, we can create a skeptical prior by ensuring our apriori probability of the treatment exerting a clinically relevant reduction in stroke is low. The definition of "low" and "clinically relevant" may vary across contexts. As before, the prior on our treatment effect is normally distributed and is thus described by a mean and a standard deviation. The mean (our best estimate of the treatment's effect) under a skeptical prior is generally 0. Obtaining the standard deviation for our skepitcal prior requires 3 simple steps. First, we must define the term "clinically relevant". For this example, we will again use a 1.1% absolute risk reduction in the risk of stroke. Second, because our prior is constructed on the log-odds scale, we must calculate the odds ratio that corresponds to this magnitude of absolute risk reduction (using a baseline risk equal to that in the control group). This minimum odds ratio is equal to `r round(min_or, 2)`. Third, we must define a SD for our normal prior such there is only a modest chance (10%) that our treatment exerts a clinically relevant effect or greater. The associated statistical code for this analysis shows how this can be calculated. This turns out to be `r round(skeptical_prior_sd, 2)` on the log-odds scale. We are now ready to re-analyze PROTECTED TAVR's results using a skeptic's lens. The resulting posterior estimate is shown in **Figure 7**.
+
+***Constructing non-informative priors***
+
+A non-informative prior corresponds to the view that, a priori, we know little about the treatment and therefore should allow the data/likelihood offered by the trial dictate our posterior estimates. This is in contrast to the skeptic who views the trial in question as being nested within a rich history of previous trials which collectively show that extreme values are quite unlikely and that most trials are closer to exerting no or little effect than they are to exerting extremely large effects.
+
+A non-informative prior is generally defined by allowing large probabilities across a range of treatment effects ranging from extreme harm to extreme benefit. This is generally done by adopting a normal prior distribution with relatively large standard deviation. We will construct this prior by adopting a normal distribution with a mean of 0 and a standard deviation of `r noninf_prior_sd` (note that the term "non-informative" is not very well defined and is a subject of semantic controversy). The resulting posterior estimates are shown in **Figure 7**.
+
+***Constructing enthusiastic priors***
+
+Enthusiastic priors, on the other hand, reflect the framework of an optimist who believes that a treatment is more likely than not to be beneficial. This belief may be based, for example, on small pilot studies or impressive results in animal studies. In the case of CEP devices in particular, it may be based on the amounts of debris recovered by these devices. It is generally the case that, for regulatory purposes, enthusiastic priors are unlikely to be deemed acceptable as, from the perspective of a regulator, it is unacceptable to presuppose that an intervention probably has some beneficial effect prior to the conduct of the trial.
+
+For an enthusiastic prior, we will construct our prior such that our best guess of the intervention's effect prior to the trial is that it does exert a clinically relevant risk reduction. As such, our prior is centered on the previously-calculated odds ratio of `r round(min_or, 2)`. Our SD must still allow for some room for doubt regarding the device's efficacy. For this example, we derive a SD such that, apriori, there's still a 30% probability of harm (corresponding to an OR \> 1) and a 20% probability of a benefit that is not clinically relevant (an OR between `r round(min_or, 2)` and 1). The associated statistical code for this analysis shows how this can be calculated. This turns out to be `r round(enthusiastic_prior_sd, 2)` The resulting posterior estimate is shown in **Figure 7** to help contrast the skeptic's and the enthusiast's interpretation of the same trial.
+
+***Constructing pessimistic priors***
+
+A pessimistic prior that is the mirror opposite of an enthusiastic prior can also be built. This may be based, for example, on outcomes for which an adverse signal has been found in previous small trials or if a non-inferiority trial is being conducted with some grounds to believe that the treatment probably leads to less favorable outcomes but not by a large margin and that it has other benefits (e.g., cost or convenience) that are sufficiently large to offset these harms.
+
+We will construct our pessimistic prior such that it is the polar opposite of our optimistic prior, centered on an odds ratio of `r round(1/min_or, 2)`, which is the reciprocal of the minimum clinically relevant odds ratio. Our standard deviation will also be the same, such that there's a 30% probability of benefit (corresponding to an OR \< 1) and a 20% probability of harm that is not clinically relevant (an OR between `r round(1/min_or, 2)` and 1). The resulting posterior estimate is shown in **Figure 7.**
+
+***Interpreting the results of different priors***
+
+When constructing priors, it is important to ensure that they are not overly rigid and are receptive to being proven wrong. Thus, although regardless of whether one elects to adopt a skeptic's or an enthusiast's point of view, it is critical that they allow enough room for uncertainty such that they can be disproven by the data. This can be observed in **Figure 7** as, although the skeptic and the enthusiast have different appreciably starting points, their posteriors are relatively similar, though a little more optimistic for the latter. Under the skeptic's prior, the posterior probability of any effect at all (even if trivial) is `r skeptical_prob_any_effect`% and the posterior probability of a clinically important effect is `r skeptical_prob_imp_effect`%. Under the non-informative prior, the posterior probability of any treatment effect is `r noninf_prob_any_effect`% and the posterior probability of an important effect is `r noninf_prob_imp_effect`%. Under the enthusiast's prior, the posterior probability of any effect at all is `r enthusiastic_prob_any_effect`% and the posterior probability of a clinically important effect is `r enthusiastic_prob_imp_effect`%. Under the pessimist's prior, the posterior probability of any effect at all is `r pessimistic_prob_any_effect`% and the posterior probability of a clinically important effect is `r pessimistic_prob_imp_effect`%.
+
+In interpreting these results, a skeptic may state that they believe the results show the device is quite unlikely to provide meaningful benefits while an enthusiast, although unable to affirm meaningful benefits, may still hold out some hope of meaningful benefit should further data arrive. The analyst adopting a non-informative prior adopts a view somewhat between the enthusiast and the skepetic.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+#Now, let us visually contrast the estimates from our prior and posterior under the skeptical and enthusiastic lens
+
+#Prior estimates from a skeptic's view:
+set.seed(100) #Set seed for reproducibility
+skeptical_prior_est <- rnorm(n = 1000000, mean = skepitcal_prior_mean, sd = skeptical_prior_sd)
+
+#And from an enthusiast's view:
+set.seed(100)
+enthusiastic_prior_est <- rnorm(n = 1000000, mean = enthusiastic_prior_mean, sd = enthusiastic_prior_sd)
+
+#And from an pessimist's view:
+set.seed(100)
+pessimistic_prior_est <- rnorm(n = 1000000, mean = pessimistic_prior_mean, sd = pessimistic_prior_sd)
+
+#And from an enthusiast's view:
+set.seed(100)
+noninf_prior_est <- rnorm(n = 1000000, mean = noninf_prior_mean, sd = noninf_prior_sd)
+
+#Now, bind them into a single data frame
+mindset_priors <- data.frame(estimate = c(skeptical_prior_est, enthusiastic_prior_est, pessimistic_prior_est, noninf_prior_est),
+           mindset = rep(c("Skeptical", "Enthusiastic", "Pessimistic", "Non-informative"), each = 1000000),
+           estimate_type = "Prior")
+
+
+#Then, we will simulate the data for the treatment effect observed in PROTECTED TAVR under a normal distribution. Again, recall that we have already done this in "ptavr_sim". We will simply store this in a dataframe
+mindset_ptavr_estimates <- data.frame(estimate = ptavr_sim, estimate_type = "Likelihood\nbased on\nPROTECTED TAVR")
+
+mindset_ptavr_estimates <- rbind(
+  mindset_ptavr_estimates %>% mutate(mindset = "Skeptical"),
+  mindset_ptavr_estimates %>% mutate(mindset = "Enthusiastic"),
+  mindset_ptavr_estimates %>% mutate(mindset = "Pessimistic"),
+  mindset_ptavr_estimates %>% mutate(mindset = "Non-informative"))
+
+#Let us now draw from our posterior
+#Skeptic's posterior
+skeptical_post_est <- as_draws(skeptical_ptavr_model, "b_cepd") %>% unlist
+#Enthusiast's posterior
+enthusiastic_post_est <- as_draws(enthusiastic_ptavr_model, "b_cepd") %>% unlist
+#Pessimist's posterior
+pessimistic_post_est <- as_draws(pessimistic_ptavr_model, "b_cepd") %>% unlist
+#Non-informative posterior
+noninf_post_est <- as_draws(noninf_ptavr_model, "b_cepd") %>% unlist
+
+#Now, bind them into a single data frame
+mindset_post <- data.frame(estimate = c(skeptical_post_est, enthusiastic_post_est, pessimistic_post_est, noninf_post_est),
+                           mindset = rep(c("Skeptical", "Enthusiastic", "Pessimistic", "Non-informative"), each = 4000),
+                           estimate_type = "Posterior")
+
+
+#Now, combine the dataframe showing predictions from our prior and posterior
+mindset <- rbind(mindset_priors, mindset_ptavr_estimates, mindset_post)
+
+#We will change the estimate type to a factor to ensure correct ordering in the plot
+mindset$estimate_type <- factor(mindset$estimate_type, levels = c("Posterior", "Likelihood\nbased on\nPROTECTED TAVR", "Prior"))
+
+#Arrange the mindset dataframe according to the type of prior
+mindset$mindset <- factor(mindset$mindset, levels = c("Skeptical", "Non-informative", "Enthusiastic", "Pessimistic"))
+
+#Create title and subtitles for the plot
+main_title <- "Figure 7: Posterior estimates under skeptical, enthusiastic, pessimistic, and non-informative priors"
+subtitle <- "The sketpical prior was calculated such that there's only a 10% chance of CEP devices exerting a minimal clinically relevant difference or greater.\nThe enthusiastic prior was calculated such that there's a 50% chance of CEP devices exerting a clinically relevant difference, a 20% chance of a clinically trivial difference, and a 30% chance of harm.\nThe pessimistic prior was the mirror opposite.\nThe non-informative prior was constructed using a normal prior with a mean of 0 and a standard deviation of 10 so as to convey very minimal information and is therefore nearly flat."
+
+#Now, we will plot
+ggplot(data = mindset,
+       aes(y = estimate_type,
+           x = exp(estimate),
+           fill = estimate_type
+       )) +
+  #Add Density plots
+  stat_halfeye(alpha = 1, .width = 0.95, fatten_point = 4, normalize = "xy") +
+  #Facet by penalty type
+  facet_grid(cols = vars(mindset)) +
+  #Set colors
+  scale_fill_tableau() +
+  #Create title
+  ggtitle(main_title,
+          subtitle = subtitle) +
+  geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set x-axis limit
+  coord_cartesian(xlim = c(1/4, 4)) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = NULL, expand = c(0, 0.1)) +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.5, 1, 2),
+                     expand = c(0, 0.1)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 17),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+
+#Save your data so that, if you rerender this code, you do not have to re-perform the time-consuming MCMC simulations
+save.image("Rendering Data.RData")
+```
+
+***Informative versus non-informative priors***
+
+It is important to briefly discuss the concept of the prior's "informativeness". In the above analyses, the non-informative prior used, which had a very large standard deviation, conveyed a great deal of a priori uncertainty about the effectiveness of CEP devices. In contrast, the enthusiastic and sketpic prior had a relatively more constrained vision of what treatment effects would be considered plausible. As such, they were more "informative". In general, priors can be conceived of as lying on a spectrum from "non-informative" on one end (which conveys a great deal of uncertainty and a near-complete lack of prior expectations) and more informative priors on the other end (which convey some uncertainty regarding the treatment's effect but nevertheless have a more constrained view of what treatment effects may be plausible in light of the rich history of RCTs in cardiovascular medicine).
+
+In general, non-informative priors, such as the non-informative prior used above, allow the likelihood function (the data from the trial) to (almost) completely dictate the posterior. As a result, some analysts prefer them on the grounds that they are more "objective" in that they only reflect the trial data at hand without consideration of prior or external evidence. However, they are also critiqued on the grounds that, by doing so, the analyst purposely discards data from thousands of RCTs which show that extreme effects are quite rare and unlikely.
+
+In contrast, skeptical priors such as the one used above constrain the resulting posterior to a range of values that is more plausible in light of what we know about the vast majority of treatment effects. This form of prior offers an important advantage in that it prevents impressive but spurious results based on minimal data to give us a false impression of the treatment being extremely effective. It is nevertheless open to the possibility that the intervention may be extremely effective if enough data accumulates.
+
+***Context-dependence of priors***
+
+It is important to note that a prior's informativeness can generally only be understood in relation to the likelihood. For example, when running a large trial with hundreds of events, a normal prior with a mean of 0 and a standard deviation of 1 will easily be overcome by the data from the trial and have little influence on the posterior. In contrast, in an analysis of few or very small trials with a small number of events, the same prior will have greater influence on the posterior. Therefore, how influential a prior is can only be properly gauged in relation to the likelihood function it is paired with.
+
+***Combining different approaches***
+
+It is also important to note that different combinations of the above approaches to incorporating priors can be used. For instance, one may choose to start skeptical prior, conduct a meta-analysis of previous RCTs, incorporate high-quality observational data using some penalty, and then analyze PROTECTED TAVR. Alternatively, one may choose to start with an non-informative prior and incorporate only prior RCTs before analyzing PROTECTED TAVR. Whatever the approach adopted, the analyst should clearly identify their choices, justify them, and show or discuss how their conclusions may have differed with alternative approaches.
