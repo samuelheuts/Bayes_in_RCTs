@@ -17,3 +17,4 @@ MINT            -  Arthur M. Albuquerque   -  Universidade Federal do Rio de Jan
 CLEAR           -  Sarah M. Urbut          -  Massachusetts General Hospital, Harvard Medical School, Boston, Massachusetts, USA.
 
 
+You can view our vignettes with full code at https://samuelheuts.github.io/Bayes_in_RCTs/
