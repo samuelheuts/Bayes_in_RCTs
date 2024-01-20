@@ -21,5 +21,5 @@ You can view our vignettes with full code:
 
 [Here](https://samuelheuts.github.io/Bayes_in_RCTs/docs/CLEAR.html) is the analysis of the CLEAR trial.
 
-[Here](https://samuelheuts.github.io/Bayes_in_RCTs/docs/protected_tavr.html) is the analysis of the PROTECTED-TAVR trial.
+[Here](https://samuelheuts.github.io/Bayes_in_RCTs/docs/PROTECTED_TAVR.html) is the analysis of the PROTECTED-TAVR trial.
 
