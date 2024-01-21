@@ -10,11 +10,11 @@ Samuel Heuts, MD, PhD, Michal J. Kawczynski, MD, Ahmed Sayed, MD, Sarah M. Urbut
 
 Please find below the separate authors of the re-analyses per individual trial:
 
+CLEAR           -  Sarah M. Urbut          -  Massachusetts General Hospital, Harvard Medical School, Boston, Massachusetts, USA.
+
 PROTECTED TAVR  -  Ahmed Sayed             -  Faculty of Medicine, Ain Shams University, Cairo, Egypt.
 
 MINT            -  Arthur M. Albuquerque   -  Universidade Federal do Rio de Janeiro, Rio de Janeiro, Brazil.
-
-CLEAR           -  Sarah M. Urbut          -  Massachusetts General Hospital, Harvard Medical School, Boston, Massachusetts, USA.
 
 
 You can view our vignettes with full code:
@@ -23,3 +23,4 @@ You can view our vignettes with full code:
 
 [Here](https://samuelheuts.github.io/Bayes_in_RCTs/docs/PROTECTED_TAVR.html) is the analysis of the PROTECTED-TAVR trial.
 
+For questions, comments, or pull-requests about the repository, source code or website, please contact surbut@mgh.harvard.edu
