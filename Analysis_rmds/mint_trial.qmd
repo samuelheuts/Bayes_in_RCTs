@@ -1,0 +1,1078 @@
+---
+title: "The Application of Bayesian Analytical Methods to Cardiovascular Clinical Trials: Why, When, and How: JACC Review Topic of the Week"
+subtitle: "Case Study: MINT under the Bayesian Lens."
+format: 
+  html:
+    toc: true
+    toc-location: body
+date: 1-20-2024
+author:
+  - name: "Arthur M. Albuquerque (arthur_albuquerque1@yahoo.com)"
+    affiliations: "Universidade Federal do Rio de Janeiro, Brazil"
+embed-resources: true
+toc: true
+toc-expand: 2
+toc-title: Contents
+page-layout: full
+code-fold: true
+editor: visual
+---
+
+Software: R
+
+# **Overview of the trial and intervention**
+
+"Restrictive or Liberal Transfusion Strategy in Myocardial Infarction and Anemia"
+
+MINT, 2023
+
+DOI: 10.1056/NEJMoa2307983
+
+Primary endpoint: 30-day death or MI
+
+Intention-to-treat analysis
+
+3504 patients
+
+P.S.: The restrictive strategy is the control arm. An OR greater than 1 represents that the liberal strategy is better than restrictive.
+
+# **Formulating prior based on previous randomized clinical trials**
+
+Let's load all packages, import data from previous RCTs on the same topic and outcome, and meta-analyze these results to create a literature-based prior.
+
+```{r message = FALSE, warning = FALSE}
+##First, we will conduct a meta-analysis of the 3 prior RCTs. This meta-analysis will form the basis of our subsequent prior
+
+#Load the packages & functions that we will need for this analysis
+require("brms")
+require("tidybayes")
+require("dplyr")
+require("ggplot2")
+require("ggridges")
+require("ggpubr")
+require("ggthemes")
+require("bpp")
+require("foreach")
+require("MetBrewer")
+require("gt")
+require("tidyr")
+
+# Set global options to suppress Stan verbose output
+options(stan.verbose = FALSE)
+
+#Trial 1: Cooper et al., 2011 ("Death or recurrent myocardial infarction at 30 days"; Table 3 from DOI: 10.1016/j.amjcard.2011.06.014)
+copper2011 <- data.frame(
+  study = "Cooper et al., 2011", #Trial name
+  total_n = c(24, 21), #Total sample size in each group
+  events_n = c(2, 2), #Patients with an event in each group
+  restrictive = c(0.5, -0.5) #Restrictive (Yes/No)
+)
+
+#Trial 2: MINT pilot, 2013 ("Death/MI" within 30 days; Table 3 from DOI: 10.1016/j.ahj.2013.03.001
+mint_pilot <- data.frame(
+  study = "MINT pilot", #Trial name
+  total_n = c(54, 55), #Total sample size in each group
+  events_n = c(12, 6), #Patients with an event in each group
+  restrictive = c(0.5, -0.5) #Restrictive (Yes/No)
+)
+
+
+#Trial 3: REALITY ("All-cause death" + "Nonfatal recurrent myocardial infarction" within 30 days; Table 3 from DOI: 10.1001/jama.2021.0135)
+reality <- data.frame(
+  study = "REALITY", #Trial name
+  total_n = c(342, 324), #Total sample size in each group
+  events_n = c(26, 35), #Patients with an event in each group
+  restrictive = c(0.5, -0.5) #Restrictive (Yes/No)
+)
+
+#Combine the data from the 3 trials into a single dataframe
+combined_data <- rbind(copper2011, mint_pilot, reality)
+
+#Now, we will write the formula we will use in the regression model
+ma_formula <- bf(
+  events_n | trials(total_n) ~ 0 + #Remove the intercept from the model (such that the risk of Death/MI is not modeled using a common term but is modeled separately for each study)
+    factor(study) + #A term to refer to each study
+    restrictive + #Treatment effect of Restrictive strategy
+    (restrictive - 1|study) #Random effects (so as to not assume Restrictive has the same effect in every trial)
+)
+
+##Now, we will set up our priors (on the log-odds scale)
+
+#Prior for the Treatment effect of restrictive (a normal distribution with a mean of 0 and a standard deviation of 10 implies we do not have any pre-existing information outside these trials for how beneficial or harmful this type of strategy may be)
+restrictive_prior <- prior(normal(0, 10), class = b, coef = "restrictive")
+
+#Prior for the Baseline risk of MI/Death (this prior is vague, since we could not find any large registry informing the risk of this outcome in this population. For further details on why this prior is vague, check "Chapter 11: GOD SPIKED THE INTEGERS" in the Statistical Rethinking book by Richard McElreath, 2nd edition.
+baseline_risk_prior <- prior(normal(0, 1.5), class = b)
+
+#Prior for between-trial Heterogeneity (this prior expresses our uncertainty about how similar trials are to one another in terms of the effectiveness of the restrictive strategy. A half-cauchy with a scale parameter of 0.5 represents a common choice in most meta-analyses)
+heterogeneity_prior <- prior(cauchy(0, 0.5), class = sd)
+
+#Now, we will collect these priors together and store them in "ma_priors" (ma: meta-analysis)
+ma_priors <- c(restrictive_prior, baseline_risk_prior, heterogeneity_prior)
+
+#Because Bayesian analyses can be somewhat time-consuming, we will use all the cores our machine has to increase computational speed
+options(mc.cores = parallel::detectCores())
+
+if(!exists("ma_model")) {
+#Run the model incorporating both the prior you chose and the data at hand
+ma_model <- brm(data = combined_data, #Use the combined dataset for the 6 trials
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = ma_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = ma_priors, #Use our prior
+               control = list(adapt_delta = 0.99),
+               backend = "cmdstanr",
+               refresh = 0
+               )
+}
+
+#Store a summary of this model
+sum_ma_model <- summary(ma_model)
+
+#Get the parameters of the row which corresponds to the treatment (restrictive)
+ma_restrictive_par <- sum_ma_model$fixed[rownames(sum_ma_model$fixed) == "restrictive", ]
+
+##Store relevant variables
+treatment_effect = fixef(ma_model) |> tail(1)
+
+#The log odds ratio
+ma_restrictive_lnor = round(treatment_effect[,"Estimate"],2)
+#Standard error of the log odds ratio
+ma_restrictive_lnor_sd = round(treatment_effect[,"Est.Error"],2)
+#The odds ratio
+ma_restrictive_or <- round(exp(treatment_effect[,"Estimate"]), 2)
+#The lower limit of the 95% credible interval of the odds ratio
+ma_restrictive_or_lci <- round(exp(treatment_effect[,"Q2.5"]), 2)
+#The upper limit of the 95% credible interval of the odds ratio
+ma_restrictive_or_uci <- round(exp(treatment_effect[,"Q97.5"]), 2)
+```
+
+This is a forest plot depicting all included RCTs and the overall effect size derived from the Bayesian random-effects meta-analysis.
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+##Figure 1
+
+#Sample the posterior distribution of study-level estimates and the overall estimate of treatment effect
+study_es <- ma_model %>%
+  spread_draws(r_study[study, ], b_restrictive) %>%
+  mutate(b_restrictive = r_study + b_restrictive, #Create treatment effect estimates for each study
+         type = "Study-level estimate") #Clarify that this is the treatment effect for each study
+         
+
+pooled_es <- spread_draws(ma_model, b_restrictive) %>% 
+  mutate(study = " Overall Effect Size", #Clarify that this is the pooled/overall treatment effect
+         type = "Pooled estimate") #Same
+
+#Exponentiate to get odds instead of log-odds ratio
+fp_data <- bind_rows(study_es, pooled_es) %>%
+  mutate(b_restrictive = b_restrictive %>% exp,
+         
+         # Fix study names
+         study = case_when(
+           study == "Cooper.et.al." ~ "Cooper et al., 2011",
+           study == "MINT.pilot" ~ "MINT pilot",
+           TRUE ~ study
+         ),
+         
+         # Reorder studies chronologically
+         study = factor(study, level = c(" Overall Effect Size",
+                                         "REALITY",
+                                         "MINT pilot",
+                                         "Cooper et al., 2011"))
+         )
+
+
+#Plot
+ggplot(data = fp_data,
+       aes(y = study,
+           x = b_restrictive,
+           fill = type
+)) +
+  #Add Density plots
+  stat_halfeye(.width = 0.95,
+               point_interval = mean_qi) +
+    geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set colors
+  scale_fill_manual(values = c("salmon", "lightblue")) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = "Study") +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.25, 0.5, 1, 2, 4)) +
+  #Set reasonable Y axis limits
+  coord_cartesian(xlim = c(0.25, 4)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold",hjust = 0.0, size = 20),
+        plot.subtitle = element_text(face = "bold", size = 15, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold"),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none",
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm"))
+
+```
+
+# **Analyzing MINT in light of prior evidence**
+
+Next step is to import data from MINT's primary outcome and analyze it using the literature-based prior shown above. The following code also shows calculations on the MCID that will be assessed later below.
+
+```{r message = FALSE}
+##We will now analyze the results of MINT using the results of our previous meta-analysis as input
+
+#First, let us build the data for the MINT trial: Myocardial infarction or death within 30 days; Figure 2 from DOI 10.1056/NEJMoa2307983)
+mint_data <- data.frame(
+  study = "MINT", #Trial name
+  total_n = c(1749, 1755), #Total sample size in each group
+  events_n = c(295, 255), #Patients with Death/MI in each group
+  restrictive = c(1, 0) #restrictive (Yes/No)
+)
+
+#The next steps are as before: first we specify the formula we will be using and then we specify the priors to be used for our analysis
+
+
+#Now, we will write the formula we will use in the regression model
+mint_formula <- bf(
+  events_n | trials(total_n) ~ 
+    1 + #Add an intercept to our model (for the baseline risk in the control group) 
+    restrictive) #Treatment effect of restrictive
+
+##Now, we will set up our priors (on the log-odds scale)
+
+# Literature-based prior for the Treatment effect of restrictive 
+mint_data_restrictive_prior <- prior(normal(ma_restrictive_lnor, ma_restrictive_lnor_sd), class = b, coef = "restrictive")
+
+#Prior for the Baseline risk of Death, MI (this is the same as that used for the meta-analysis).
+baseline_prior <- prior(normal(0, 1.5), class = Intercept)
+
+#Combine these 2 priors into the same object
+mint_priors <- c(mint_data_restrictive_prior, baseline_prior)
+
+if(!exists("mint_model")) {
+#Run the model incorporating both the prior from the meta-analysis and the data from MINT
+mint_model <- brm(data = mint_data, #Use the dataset from MINT
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = mint_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = mint_priors, #Use the prior based on the meta-analysis
+               stanvars = stanvar(ma_restrictive_lnor) + stanvar(ma_restrictive_lnor_sd), #We pass the variable names used in our priors here so that Stan recognizes them
+               backend = "cmdstanr",
+               refresh = 0
+               )
+}
+
+#Store a summary of this model
+sum_mint_model <- summary(mint_model)
+
+#Get the parameters of the row which corresponds to the treatment (restrictive)
+mint_restrictive_par <- sum_mint_model$fixed[rownames(sum_mint_model$fixed) == "restrictive", ]
+
+
+###We now want to obtain several values of interest
+##First, let us get estimates of treatment effect
+
+treatment_effect_mint= fixef(mint_model) |> tail(1)
+
+#The log odds ratio
+mint_restrictive_lnor = round(treatment_effect_mint[,"Estimate"],2)
+#Standard error of the log odds ratio
+mint_restrictive_lnor_sd = round(treatment_effect_mint[,"Est.Error"],2)
+#The odds ratio
+mint_restrictive_or <- round(exp(treatment_effect_mint[,"Estimate"]), 2)
+#The lower limit of the 95% credible interval of the odds ratio
+mint_restrictive_or_lci <- round(exp(treatment_effect_mint[,"Q2.5"]), 2)
+#The upper limit of the 95% credible interval of the odds ratio
+mint_restrictive_or_uci <- round(exp(treatment_effect_mint[,"Q97.5"]), 2)
+
+
+##Then, we ask the question: what is the posterior probability that liberal exerts a protective effect? (this corresponds to a log odds ratio > 0)
+any_effect <- hypothesis(mint_model, #Our model
+           "restrictive > 0") 
+
+# what is the posterior probability that liberal exerts a *harmful* effect? (this corresponds to a log odds ratio < 0)
+any_harm_effect <- hypothesis(mint_model, #Our model
+           "restrictive < 0") 
+
+#To facilitate the interpretation of this output for readers, we multiply by 100 (to convert to %) and round to 2 decimal places
+post_prob_any_effect <- round(100*(any_effect$hypothesis$Post.Prob), 2)
+
+post_prob_any_harm_effect <- round(100*(any_harm_effect$hypothesis$Post.Prob), 2)
+
+
+##We may then ask the question: what is the posterior probability that liberal exerts a meaningful (clinically relevant) effect?
+
+#To do this, it is first necessary to define a baseline risk with the restrictive strategy. We will use the baseline risk in the control group, although ideally this risk estimate should be tailored to individual patients.
+baseline_risk <- mint_data[mint_data$restrictive == 1, "events_n"]/mint_data[mint_data$restrictive == 1, "total_n"]
+
+#We must then defined what we would see as the minimum clinically important difference (MCID). We will 1.8% which corresponds to 20% relative risk reduction according to sample size planning in MINT's protocol.
+
+mcid <- 0.018
+
+# Instead of doing "baseline_risk - mcid", in this example I will add both because the MINT investigators defined the restrictive strategy is the control arm and that an OR > 1 indicates that the liberal arm is superior.
+
+#Therefore, the risk in the intervention (restrictive) arm ought to be:
+greater_risk <- baseline_risk + mcid
+
+#The formula to convert from risk (probability) to odds is: R / (1 - R)
+baseline_odds <- baseline_risk / (1 - baseline_risk)
+greater_odds <- greater_risk / (1 - greater_risk)
+
+#Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+min_or <- greater_odds/baseline_odds
+
+##Then, we ask the question: what is the posterior probability that restrictive exerts a meaningful effect? This corresponds to an odds ratio > 1.13. On the log-scale, this corresponds to 0.12
+question <- paste0("restrictive > ", log(min_or) )
+
+#We then use the "hypothesis" function from brms to answer our question
+mcid_effect <- hypothesis(mint_model, #Our model
+                          hypothesis = question) #Our question of interest (OR being > 0.12)
+
+#To facilitate the interpretation of this output for readers, we multiply by 100 (to convert to %) and round to 2 decimal places
+post_prob_mcid <- round(100*(mcid_effect$hypothesis$Post.Prob), 2)
+
+# Given the clear opposite effect, one can calculate the MCID in terms of harms by getting the inverse of the MCID
+harm_min_or = 1/min_or
+harm_mcid_question <- paste0("restrictive < ", log(harm_min_or) )
+harm_mcid_effect <- hypothesis(mint_model, #Our model
+                          hypothesis = harm_mcid_question)
+
+post_prob_harm_mcid <- round(100*(harm_mcid_effect$hypothesis$Post.Prob), 2)
+
+
+```
+
+
+```{r}
+# MCID of 1%
+
+mcid1 <- 0.01
+
+#Therefore, the risk in the intervention arm ought to be:
+greater_risk1 <- baseline_risk + mcid1
+
+#The formula to convert from risk (probability) to odds is: R / (1 - R)
+baseline_odds <- baseline_risk / (1 - baseline_risk)
+greater_odds1 <- greater_risk1 / (1 - greater_risk1)
+
+#Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+min_or1 <- greater_odds1/baseline_odds
+
+##Then, we ask the question: what is the posterior probability that the liberal strategy exerts a meaningful effect? This corresponds to an odds ratio > 1.07, On the log-scale, this corresponds to 0.06
+question1 <- paste0("restrictive > ", log(min_or1) )
+
+#We then use the "hypothesis" function from brms to answer our question
+mcid_effect1 <- hypothesis(mint_model, #Our model
+                          hypothesis = question1) 
+
+#To facilitate the interpretation of this output for readers, we multiply by 100 (to convert to %) and round to 2 decimal places
+post_prob_mcid1 <- round(100*(mcid_effect1$hypothesis$Post.Prob), 2)
+
+# Given the clear opposite effect, one can calculate the MCID in terms of harms by getting the inverse of the MCID
+harm_min_or1 = 1/min_or1
+harm_mcid_question1 <- paste0("restrictive < ", log(harm_min_or1) )
+harm_mcid_effect1 <- hypothesis(mint_model, #Our model
+                          hypothesis = harm_mcid_question1) 
+
+post_prob_harm_mcid1 <- round(100*(harm_mcid_effect1$hypothesis$Post.Prob), 2)
+```
+
+
+```{r message = FALSE}
+
+###The posterior of our model is a combination of information from 2 sources: the prior we fed into our model and the new data from MINT.
+
+#To see this more explicitly, let us specifically highlight 3 items:
+
+#The prior for the effectiveness of restrictive (expressed on the log-odds scale), which was obtained from our meta-analysis, is a normal distribution. 
+
+#Like any normal distribution, it is described using 2 parameters: the mean (0.01) and a standard deviation (0.51)
+
+set.seed(123)
+
+#Let's simulate a normal distribution with these parameters to see what this looks like
+prior_sim <- rnorm(n = 10000, #Number of simulations
+      mean = ma_restrictive_lnor, #The log-OR from our meta-analysis
+      sd = ma_restrictive_lnor_sd) #The standard error of the log-OR from our meta-analysis
+
+
+#The new data on the effect of restrictive from MINT (The "Likelihood") can also be expressed as a normal distribution. Like the prior which was also represented using a normal distribution, it will have a mean (representing the OR) and a standard deviation.
+
+##We will calculate these values manually:
+#To get the odds ratio, first calculate the odds of a Death/MI in the restrictive arm:
+restrictive_arm_odds <- mint_data$events_n[mint_data$restrictive == 1]/(mint_data$total_n[mint_data$restrictive == 1] - mint_data$events_n[mint_data$restrictive == 1])
+#Then, calculate the odds of Death/MI in the liberal arm:
+liberal_arm_odds <- mint_data$events_n[mint_data$restrictive == 0]/(mint_data$total_n[mint_data$restrictive == 0] - mint_data$events_n[mint_data$restrictive == 0])
+
+#The odds ratio is obtained by dividing these 2 odds by one another
+newdata_or <- round(restrictive_arm_odds/liberal_arm_odds, 2)
+
+#Let us convert to the log scale 
+newdata_lnor <- log(newdata_or)
+
+#We have the mean for our normal distribution. We now need to calculate the standard deviation. This is obtained by the formula SD = sqrt(1/a + 1/b + 1/c + 1/d)
+newdata_lnor_sd <- round(sqrt(
+  1/mint_data$total_n[mint_data$restrictive == 1] +
+  1/mint_data$total_n[mint_data$restrictive == 0] +  
+  1/mint_data$events_n[mint_data$restrictive == 1] +
+  1/mint_data$events_n[mint_data$restrictive == 0]
+  ),
+  2)
+
+#Now we have the SD of our normal distribution as well. We can therefore easily simulate the likelihood function for the data from the PROTECTED TAVR trial as follows:
+mint_sim <- rnorm(n = 10000,
+                   mean = newdata_lnor,
+                   sd = newdata_lnor_sd)
+
+##We can also simulate the normal distribution for our posterior using the model parameters obtained from the "mint_model" object above
+post_sim <- rnorm(n = 10000,
+                  mean = mint_restrictive_lnor,
+                  sd = mint_restrictive_lnor_sd)
+
+##Let us recap the 3 distributions we now have:
+# "prior_sim", which contains our prior (obtained from the meta-analysis)
+# "mint_sim" which contains the data from the MINT trial
+# "post_sim" which contains the data from our posterior (the combination of the above 2)
+
+#In the next code block, we will proceeed to plot these 3 distributions to give a conceptual overview of what the model-fitting process looks like under the hood.
+```
+
+This figure depicts the literature-based prior, MINT (likelihood) and the combination of both (posterior).
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+
+###Figure 2
+
+#First, let us create a dataframe containing the above 3 simulations
+sims <- data.frame(sim_lnor = c(prior_sim, mint_sim, post_sim), #This column contains the results of our simulations (each of length 10,000)
+           sim_type = rep(c("Prior", "Likelihood", "Posterior"), each = 10000) #This column contains the labels of these simulations so we can identify which simulation each row belongs to
+           )
+
+#Arrange sim_type so that it shows up with the prior on top, the posterior at the bottom, and likelihood in the middle.
+sims$sim_type <- factor(sims$sim_type, levels = c("Posterior", "Likelihood", "Prior"))
+
+
+#Now, let us visualize this:
+#Plot
+ggplot(data = sims,
+       aes(y = sim_type,
+           x = exp(sim_lnor),
+           fill = sim_type
+       )) +
+  #Add Density plots
+  stat_halfeye(alpha = 0.7, .width = 0.95) +
+  #Set colors
+  scale_fill_manual(name = "Information source:",
+                    values = c("lightblue", "darkolivegreen", "salmon")) +
+  geom_vline(xintercept = 1, color = "black", 
+             lwd = 1, linetype = 2) +
+  #Set x-axis limit
+  coord_cartesian(xlim = c(0.3, 3)) +
+  #X and Y axes aesthetics
+  scale_y_discrete(name = NULL, expand = c(0, 0.03)) +
+  scale_x_continuous(name = "Odds Ratio",
+                     trans = "log",
+                     breaks = c(0.33, 0.5,1, 2, 3)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+
+```
+
+# **Converting treatment effects to meaningful clinical quantities**
+
+Now, I will convert the posterior's odds ratio to absolute risk difference.
+We will use MINT's observed control group risk as the "baseline risk" (= 16%).
+
+Here is the posterior distribution shown above:
+
+```{r}
+
+
+fixef(mint_model, summary = F) |> 
+  data.frame() |> 
+  select(2) |> 
+  mutate(OR = exp(restrictive)) |> 
+  
+  ggplot() +
+  aes(x = OR) +
+  stat_halfeye(.width = 0.95, fill = "lightblue") +
+  #scale_x_continuous(breaks = seq(-2, 8, 2)) +
+ # coord_cartesian(x = c(-3, 8)) +
+  labs(x = "Odds Ratio") +
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 20, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+```
+
+And this is the derived posterior distribution in the absolute risk difference scale:
+
+```{r}
+# Equation 10 in https://doi.org/10.1016/j.jclinepi.2020.08.019
+
+ARD_fun = function(R0, OR){
+(R0*(R0-1)*(OR-1))/(R0*OR - R0 + 1)
+
+}
+
+fixef(mint_model, summary = F) |> 
+  data.frame() |> 
+  select(2) |> 
+  # multiply by 100 to convert to %, and by -1 since, in this example, ARD > 0 
+  # means that the restrictive arm is harmful
+  mutate(ARD = -1*100*ARD_fun(R0 = baseline_risk, OR = exp(restrictive))) |> 
+  
+  ggplot() +
+  aes(x = ARD) +
+  stat_halfeye(.width = 0.95, fill = "lightblue") +
+  scale_x_continuous(breaks = seq(-2.5, 7.5, 2.5)) +
+ # coord_cartesian(x = c(-3, 8)) +
+  labs(x = "Absolute Risk Difference (%)") +
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 15, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 20, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16, face = "bold"),
+        legend.key.width = unit(1.5, "cm"),
+        legend.key.height = unit(0.75, "cm")
+        )
+```
+
+Finally, we will now calculate the posterior probability of all possible levels of efficacy. 
+We highlight the originally chosen MCID of 1.8%.
+
+
+```{r}
+#Now we will do something more useful: We will calculate the probability that liberal exerts a protective effect for a range of risk reductions ranging from any reduction at all to completely eliminating the risk of death/MI
+
+#Range of MCIDs in which we may be interested (from 0% to fully eliminating the baseline risk, 0.01% at a time)
+mcids <- c(0.018, seq(0, baseline_risk, 0.01))
+
+#Set up an empty dataframe to store our probabilities
+cum_postd <- data.frame()
+
+#Set up a loop to replicate the analysis above for every single mcid stored in mcids
+for(mcid in mcids) {
+
+  #Therefore, the risk in the intervention arm ought to be:
+  greater_risk <- baseline_risk + mcid
+
+  #The formula to convert from risk (probability) to odds is: R / (1 - R)
+  baseline_odds <- baseline_risk / (1 - baseline_risk)
+  greater_odds <- greater_risk / (1 - greater_risk)
+  
+  #Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+  minimum_relevant_or <- greater_odds/baseline_odds
+  
+  
+  question <- paste0("restrictive > ", log(minimum_relevant_or))
+  
+  #And we use the hypothesis function to find out
+  effect <- hypothesis(mint_model, #Our model
+                       hypothesis = question) #The log-odds ratio to use
+  
+  
+  cum_postd <- rbind(cum_postd, #The empty dataframe we created above
+                     
+                     data.frame( #The dataframe we created using data in this loop
+                       difference = mcid, #The log-odds ratio we used
+                       post_probs = effect$hypothesis$Post.Prob) #The posterior probability
+  )
+}
+
+cum_postd |> 
+  
+  ggplot(aes(y = post_probs*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           x = difference*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           fill = ifelse(difference >= 0, "Positive", "Negative"))
+       ) +
+
+#Add Density plots
+    #Add Density plots
+  geom_area(fill = "lightblue",
+            alpha = 0.7) +
+  #Set colors
+  #Plot a vertical line at a MCID of 1.8%
+  geom_vline(xintercept = 1.8, color = "black", 
+             lwd = 0.75, linetype = 2) +
+  #X and Y axes aesthetics
+  scale_y_continuous(name = "Probability of reducing risk by >= X (%)", 
+                     expand = c(0, 0),
+                     breaks = seq(20, 100, 20)) +
+  scale_x_continuous(name = "Absolute Risk Difference (%)",
+                     expand = c(0, 0),
+                     breaks = seq(0, 8, 1)) +
+  #Set coordinate limits
+  coord_cartesian(ylim = c(0, 100),
+                  xlim = c(0, 8)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 17, face = "bold"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none"
+        )
+```
+
+
+# **Using Bayesian analyses to inform personalized treatment decisions**
+
+Let's perform the same calculations shown above, but with different baseline risks.
+
+```{r}
+
+##To facilitate the calculation of meaningful risk reductions in Death/MI across different risk levels. We will convert the for loop we created above to a function that can incorporate our baseline risks of interest and the MCIDs of interest
+
+
+# Harm analyses
+
+calculate_cum_post_prob <- function(baseline_risks, mcids, brm_model) {
+  
+  #Set up an empty dataframe to store our probabilities
+  cum_post_probs_df <- data.frame()
+  
+  #Set up a for loop to replicate the analysis below for every baseline risk of interest
+  
+  for(baseline_risk in baseline_risks) {
+    
+    #Set up a (nested) for loop to replicate the analysis below for every single mcid stored in mcids
+    for(mcid in mcids[mcids < baseline_risk]) {
+      
+      #Therefore, the risk in the intervention arm ought to be:
+      greater_risk <- baseline_risk + mcid
+      
+      #The formula to convert from risk (probability) to odds is: R / (1 - R)
+      baseline_odds <- baseline_risk / (1 - baseline_risk)
+      greater_odds <- greater_risk / (1 - greater_risk)
+      
+      #Therefore, if the intervention provides a MCID, the odds ratio should be at least:
+      minimum_relevant_or <- greater_odds/baseline_odds
+      
+      
+      question <- paste0("restrictive > ", log(minimum_relevant_or))
+      
+      #And we use the hypothesis function to find out
+      effect <- hypothesis(brm_model, #Our model
+                           hypothesis = question) #The log-odds ratio to use
+      
+      
+      cum_post_probs_df <- rbind(cum_post_probs_df, #The empty dataframe we created above
+                         
+                         data.frame( #The dataframe we created using data in this loop
+                           difference = mcid, #The user-specified MCID
+                           post_probs = effect$hypothesis$Post.Prob, #The posterior probability as returned by the model
+                           baseline_risk = baseline_risk) #The user-specified baseline risk
+      )
+    }
+  }
+  #Return the output
+  cum_post_probs_df
+}
+
+
+#Calcualte the probability of benefit across 6 different baseline risks and store them
+
+ard_probabilities <- calculate_cum_post_prob(baseline_risks = seq(0.1, 0.2, 0.02), 
+                        mcids = seq(0, 0.1, 0.01), #Spectrum of risk differences
+                        brm_model = mint_model) #Our model
+```
+
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+
+
+#Now, let's plot our results:
+ggplot(data = ard_probabilities,
+       aes(y = post_probs*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           x = difference*100, #Multiply by 100 to convert to % (to facilitate interpretation)
+           color = factor(baseline_risk*100),
+           group = baseline_risk
+       )) +
+  #Add Density plots
+    #Add Density plots
+  geom_line(linewidth = 1.25) +
+  #Set colors
+  scale_color_tableau(name = "Baseline risk (%)") +
+  #Plot a vertical line at a MCID of 1.8%
+  geom_vline(xintercept = 1.8, color = "black", 
+             lwd = 0.75, linetype = 2) +
+  #X and Y axes aesthetics
+  scale_y_continuous(name = "Probability of reducing risk by >= X (%)", 
+                     expand = c(0, 0),
+                     breaks = seq(20, 100, 20)) +
+  scale_x_continuous(name = "Absolute Risk Difference (%)",
+                     expand = c(0, 0),
+                     breaks = seq(0, 5, 0.5)) +
+  #Set limits on the Y-axis
+  coord_cartesian(ylim = c(0, 100),
+                  xlim = c(0, 6)) +
+  #Set theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+        plot.title=element_text(face = "bold", hjust = 0.0, size = 18),
+        plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+        axis.text.x = element_text(size = 20, face = "bold"),
+        axis.text.y = element_text(size = 20, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(size = 25, face = "bold"),
+        axis.title.y = element_text(size = 25, face = "bold"),
+        axis.line = element_line(colour = "black", linewidth = 1.2),
+        plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.position = "none"
+        ) +
+  guides(color = guide_legend(nrow = 1))
+```
+
+
+# ***Different priors***
+
+Code with all models:
+
+```{r fig.width = 16, fig.height = 9, message = FALSE}
+
+# Function from https://hbiostat.org/r/examples/rmsbgraphicsvignette/graphics
+normsolve <- function (myvalue, myprob = 0.025, mu=0, convert2 =c("none", "log", "logodds")){
+  ## modified bbr's normsolve() 
+  ## normsolve() solves for SD (of a normal distribution) such that the tail (area) probability beyond myvalue is myprob
+  ## myprob = tail area probability
+  ## convert2() converts mu and myvalue to the scale of the normal distribution 
+  ## If mu and myvalue are OR values, use "log" to convert them to log(OR)
+  ## If mu and myvalue are prob values, use "logodds" to convert them to log(odds)
+  
+  if (missing(convert2)) {convert2 <-  "none"}    
+  if (convert2=="log" & mu==0) {
+    cat ("Note: mu cannot be 0 so setting an arbitrary value of 1.0")
+    mu = 1
+  }
+  mysd <- switch(convert2, 
+                 "none" = (myvalue-mu)/qnorm(1-myprob),
+                 "log" =  (log(myvalue)- log(mu))/qnorm(1-myprob),
+                 "logodds" = (qlogis(myvalue)- qlogis(mu))/qnorm(1-myprob)   )
+  return(mysd)
+}
+
+
+
+#The skeptical mean is centered on 0
+
+
+skepitcal_prior_mean <- 0
+
+#Find the SD of a normal distribution with a mean 0 such that the probability of a clinically meaningful benefit (ARR > or equal to 1.8% corresponding to an OR of 1.13 or less as previously shown) is 10%.
+
+skeptical_prior_sd = normsolve(myvalue = log(min_or), myprob =  0.1,
+                               mu = skepitcal_prior_mean,
+                               convert2 = "none")
+
+#Create your skeptical prior
+skeptical_prior <- prior(normal(skepitcal_prior_mean, skeptical_prior_sd))
+
+#The enthusiastic mean is centered on the minimal clinically relevant difference (in this case, the OR corresponding to said difference)
+enthusiastic_prior_mean <- log(min_or)
+
+#The enthusiastic SD gives a 70% probability of benefit (versus 30% of harm)
+enthusiastic_prior_sd = normsolve(myvalue = 0, myprob =  0.7,
+                                  mu = enthusiastic_prior_mean,
+                               convert2 = "none")
+
+#Create your enthusiastic prior
+enthusiastic_prior <- prior(normal(enthusiastic_prior_mean, enthusiastic_prior_sd))
+
+#Create your pessimistic prior
+# This prior has the same SD as the enthusiastic and the opposite mean value
+
+pessimistic_prior <- prior(normal(-enthusiastic_prior_mean, enthusiastic_prior_sd))
+
+##Let us construct a "noninf/non-informative" prior 
+#This will be done using a normal distribution at a mean of 0 and with a large SD of 10. This allows relatively large probabilities of extremely large (and unrealistic) treatment effects. It is (roughly) equivalent to allowing the data/likelihood to completely dictate your posterior as you discard all prior knowledge as irrelevant to assessing the results of MINT
+noninf_prior_mean <- 0
+noninf_prior_sd <- 10
+
+#Create your noninformative prior
+noninf_prior <- prior(normal(noninf_prior_mean, noninf_prior_sd))
+
+#Now, we will reuse the same formula as before
+mint_formula <- bf(
+  events_n | trials(total_n) ~ 
+    1 + #Add an intercept to our model (for the baseline risk in the control group) 
+    restrictive) #Treatment effect of restrictive
+
+
+##Now, we will perform the analysis using the skeptical and enthusiastic prior.
+
+if(!exists("skeptical_mint_model")) {
+#Run the model incorporating the data from PROTECT TAVR under a skepitcal prior
+skeptical_mint_model <- brm(data = mint_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = mint_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = skeptical_prior, 
+               stanvars = stanvar(skepitcal_prior_mean) + stanvar(skeptical_prior_sd), #We pass the variable names used in our priors here so that Stan recognizes them
+               backend = "cmdstanr",
+               refresh = 0
+               )
+}
+
+if(!exists("enthusiastic_mint_model")) {
+#Run the model incorporating the data from PROTECT TAVR under an enthusiastic prior
+enthusiastic_mint_model <- brm(data = mint_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = mint_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = enthusiastic_prior, 
+               stanvars = stanvar(enthusiastic_prior_mean) + stanvar(enthusiastic_prior_sd), #We pass the variable names used in our priors here so that Stan recognizes them
+               backend = "cmdstanr",
+               refresh = 0
+               )
+}
+
+if(!exists("pessimistic_mint_model")) {
+#Run the model incorporating the data from PROTECT TAVR under an enthusiastic prior
+pessimistic_mint_model <- brm(data = mint_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = mint_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = pessimistic_prior, 
+               stanvars = stanvar(enthusiastic_prior_mean) + stanvar(enthusiastic_prior_sd), #We pass the variable names used in our priors here so that Stan recognizes them
+               backend = "cmdstanr",
+               refresh = 0
+               )
+}
+
+if(!exists("noninf_mint_model")) {
+#Run the model incorporating the data from PROTECT TAVR under a noninf prior
+noninf_mint_model <- brm(data = mint_data, #Use the dataset from PROTECT TAVR
+               family = binomial, #Using a binomial distribution (Since our outcome is a binary Stroke/No stroke)
+               formula = mint_formula, #Use our formula
+               seed = 100, #Set seed for reproducibility
+               prior = noninf_prior, #Use the prior based on the meta-analysis
+               stanvars = stanvar(noninf_prior_mean) + stanvar(noninf_prior_sd), #We pass the variable names used in our priors here so that Stan recognizes them
+               backend = "cmdstanr",
+               refresh = 0
+               )
+}
+
+
+##Obtain posterior probability of effect under the 2 models
+#Skeptic
+skeptical_prob_any_effect <- hypothesis(skeptical_mint_model,
+                                         "restrictive > 0")
+skeptical_prob_any_effect <- round(skeptical_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_any_effect <- hypothesis(enthusiastic_mint_model,
+                                         "restrictive > 0")
+enthusiastic_prob_any_effect <- round(enthusiastic_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#pessimistic
+pessimistic_prob_any_effect <- hypothesis(pessimistic_mint_model,
+                                         "restrictive > 0")
+pessimistic_prob_any_effect <- round(pessimistic_prob_any_effect$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_any_effect <- hypothesis(noninf_mint_model,
+                                         "restrictive > 0")
+noninf_prob_any_effect <- round(noninf_prob_any_effect$hypothesis$Post.Prob*100, 2)
+##Obtain posterior probability of important effect under the 2 models
+#Skeptic
+skeptical_prob_imp_effect <- hypothesis(skeptical_mint_model,
+                                         paste0("restrictive > ", log(min_or)))
+skeptical_prob_imp_effect <- round(skeptical_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_imp_effect <- hypothesis(enthusiastic_mint_model,
+                                         paste0("restrictive > ", log(min_or)))
+enthusiastic_prob_imp_effect <- round(enthusiastic_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+#pessimistic
+pessimistic_prob_imp_effect <- hypothesis(pessimistic_mint_model,
+                                         paste0("restrictive > ", log(min_or)))
+pessimistic_prob_imp_effect <- round(pessimistic_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_imp_effect <- hypothesis(noninf_mint_model,
+                                         paste0("restrictive > ", log(min_or)))
+noninf_prob_imp_effect <- round(noninf_prob_imp_effect$hypothesis$Post.Prob*100, 2)
+
+## Harm analyses
+
+#Obtain posterior probability of effect under the 2 models
+#Skeptic
+skeptical_prob_any_harm_effect <- hypothesis(skeptical_mint_model,
+                                        "restrictive < 0")
+skeptical_prob_any_harm_effect <- round(skeptical_prob_any_harm_effect$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_any_harm_effect <- hypothesis(enthusiastic_mint_model,
+                                           "restrictive < 0")
+enthusiastic_prob_any_harm_effect <- round(enthusiastic_prob_any_harm_effect$hypothesis$Post.Prob*100, 2)
+#pessimistic
+pessimistic_prob_any_harm_effect <- hypothesis(pessimistic_mint_model,
+                                           "restrictive < 0")
+pessimistic_prob_any_harm_effect <- round(pessimistic_prob_any_harm_effect$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_any_harm_effect <- hypothesis(noninf_mint_model,
+                                     "restrictive < 0")
+noninf_prob_any_harm_effect <- round(noninf_prob_any_harm_effect$hypothesis$Post.Prob*100, 2)
+##Obtain posterior probability of important effect under the 2 models
+#Skeptic
+skeptical_prob_harm_imp_effect <- hypothesis(skeptical_mint_model,
+                                        paste0("restrictive < ", -log(min_or)))
+skeptical_prob_harm_imp_effect <- round(skeptical_prob_harm_imp_effect$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_harm_imp_effect <- hypothesis(enthusiastic_mint_model,
+                                           paste0("restrictive < ", -log(min_or)))
+enthusiastic_prob_harm_imp_effect <- round(enthusiastic_prob_harm_imp_effect$hypothesis$Post.Prob*100, 2)
+#pessimistic
+pessimistic_prob_harm_imp_effect <- hypothesis(pessimistic_mint_model,
+                                           paste0("restrictive < ", -log(min_or)))
+pessimistic_prob_harm_imp_effect <- round(pessimistic_prob_harm_imp_effect$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_harm_imp_effect <- hypothesis(noninf_mint_model,
+                                     paste0("restrictive < ", -log(min_or)))
+noninf_prob_harm_imp_effect <- round(noninf_prob_harm_imp_effect$hypothesis$Post.Prob*100, 2)
+```
+
+```{r}
+# MCID = 0.01
+
+#Skeptic
+skeptical_prob_imp_effect1 <- hypothesis(skeptical_mint_model,
+                                        paste0("restrictive > ", log(min_or1)))
+skeptical_prob_imp_effect1 <- round(skeptical_prob_imp_effect1$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_imp_effect1 <- hypothesis(enthusiastic_mint_model,
+                                           paste0("restrictive > ", log(min_or1)))
+enthusiastic_prob_imp_effect1 <- round(enthusiastic_prob_imp_effect1$hypothesis$Post.Prob*100, 2)
+#pessimistic
+pessimistic_prob_imp_effect1 <- hypothesis(pessimistic_mint_model,
+                                          paste0("restrictive > ", log(min_or1)))
+pessimistic_prob_imp_effect1 <- round(pessimistic_prob_imp_effect1$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_imp_effect1 <- hypothesis(noninf_mint_model,
+                                     paste0("restrictive > ", log(min_or1)))
+noninf_prob_imp_effect1 <- round(noninf_prob_imp_effect1$hypothesis$Post.Prob*100, 2)
+
+## Harm analyses
+
+#Skeptic
+skeptical_prob_harm_imp_effect1 <- hypothesis(skeptical_mint_model,
+                                             paste0("restrictive < ", -log(min_or1)))
+skeptical_prob_harm_imp_effect1 <- round(skeptical_prob_harm_imp_effect1$hypothesis$Post.Prob*100, 2)
+#Enthusiastic
+enthusiastic_prob_harm_imp_effect1 <- hypothesis(enthusiastic_mint_model,
+                                                paste0("restrictive < ", -log(min_or1)))
+enthusiastic_prob_harm_imp_effect1 <- round(enthusiastic_prob_harm_imp_effect1$hypothesis$Post.Prob*100, 2)
+#pessimistic
+pessimistic_prob_harm_imp_effect1 <- hypothesis(pessimistic_mint_model,
+                                               paste0("restrictive < ", -log(min_or1)))
+pessimistic_prob_harm_imp_effect1 <- round(pessimistic_prob_harm_imp_effect1$hypothesis$Post.Prob*100, 2)
+#Non-informative
+noninf_prob_harm_imp_effect1 <- hypothesis(noninf_mint_model,
+                                          paste0("restrictive < ", -log(min_or1)))
+noninf_prob_harm_imp_effect1 <- round(noninf_prob_harm_imp_effect1$hypothesis$Post.Prob*100, 2)
+```
+
+
+Here is the summary of all priors applied in the following analyses:
+
+
+```{r}
+tribble(
+  ~"Prior", ~"Mean", ~"SD",
+  "Literature-based ", treatment_effect[,"Estimate"], treatment_effect[,"Est.Error"],
+  "Non-informative", noninf_prior_mean, noninf_prior_sd,
+  "Skeptical", skepitcal_prior_mean, skeptical_prior_sd,
+  "Enthusiastic", enthusiastic_prior_mean, enthusiastic_prior_sd,
+  "Pessimistic", -enthusiastic_prior_mean, enthusiastic_prior_sd
+) |> 
+  gt()
+```
+
+
+# **Summary results**
+
+MCID of 1.8%
+
+```{r}
+tribble(
+  ~"Prior", ~"Pr(Any benefit)", ~"Pr(MCID benefit)", ~"Pr(Any harm)", ~"Pr(MCID harm)",
+  "Literature-based ", post_prob_any_effect, post_prob_mcid, post_prob_any_harm_effect, post_prob_harm_mcid,
+  "Non-informative", noninf_prob_any_effect, noninf_prob_imp_effect, noninf_prob_any_harm_effect, noninf_prob_harm_imp_effect,
+  "Skeptical", skeptical_prob_any_effect, skeptical_prob_imp_effect, skeptical_prob_any_harm_effect, skeptical_prob_harm_imp_effect,
+  "Enthusiastic", enthusiastic_prob_any_effect, enthusiastic_prob_imp_effect, enthusiastic_prob_any_harm_effect, enthusiastic_prob_harm_imp_effect,
+  "Pessimistic", pessimistic_prob_any_effect, pessimistic_prob_imp_effect, pessimistic_prob_any_harm_effect, pessimistic_prob_harm_imp_effect
+) |> 
+  gt() |> 
+  tab_footnote(footnote = "Restrictive strategy is the control arm. An OR greater than 1 represents that the liberal strategy is better than restrictive.") |> 
+  tab_footnote(footnote = "Assumed control arm risk = 16.9%") |> 
+  tab_footnote(footnote = "Pr(Any benefit) = Pr(OR > 1.0) = Pr(ARD > 0%)") |> 
+  tab_footnote(footnote = "Pr(MCID benefit) = Pr(OR > 1.13) = Pr(ARD > 1.8%)") |> 
+  tab_footnote(footnote = "Pr(Any harm) = Pr(OR < 1.0) = Pr(ARD < 0%)") |> 
+  tab_footnote(footnote = "Pr(MCID harm) = Pr(OR < 0.88) = Pr(ARD < 1.8%)") 
+```
+
+MCID of 1%
+
+```{r}
+tribble(
+  ~"Prior", ~"Pr(Any benefit)", ~"Pr(MCID benefit)", ~"Pr(Any harm)", ~"Pr(MCID harm)",
+  "Literature-based ", post_prob_any_effect, post_prob_mcid1, post_prob_any_harm_effect, post_prob_harm_mcid1,
+  "Non-informative", noninf_prob_any_effect, noninf_prob_imp_effect1, noninf_prob_any_harm_effect, noninf_prob_harm_imp_effect1,
+  "Skeptical", skeptical_prob_any_effect, skeptical_prob_imp_effect1, skeptical_prob_any_harm_effect, skeptical_prob_harm_imp_effect1,
+  "Enthusiastic", enthusiastic_prob_any_effect, enthusiastic_prob_imp_effect1, enthusiastic_prob_any_harm_effect, enthusiastic_prob_harm_imp_effect1,
+  "Pessimistic", pessimistic_prob_any_effect, pessimistic_prob_imp_effect1, pessimistic_prob_any_harm_effect, pessimistic_prob_harm_imp_effect1
+) |> 
+  gt() |> 
+  tab_footnote(footnote = "Restrictive strategy is the control arm. An OR greater than 1 represents that the liberal strategy is better than restrictive.") |> 
+  tab_footnote(footnote = "Assumed control arm risk = 16.9%") |> 
+  tab_footnote(footnote = "Pr(Any benefit) = Pr(OR > 1.0) = Pr(ARD > 0%)") |> 
+  tab_footnote(footnote = "Pr(MCID benefit) = Pr(OR > 1.07) = Pr(ARD > 1%)") |> 
+  tab_footnote(footnote = "Pr(Any harm) = Pr(OR < 1.0) = Pr(ARD < 0%)") |> 
+  tab_footnote(footnote = "Pr(MCID harm) = Pr(OR < 0.93) = Pr(ARD < 1%)") 
+```
+
+
+

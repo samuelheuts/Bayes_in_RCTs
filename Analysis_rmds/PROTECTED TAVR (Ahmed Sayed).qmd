@@ -6,7 +6,7 @@ format:
     toc: true
     toc-location: body
 date: 1-7-2024
-theme: darkly
+theme: lightly
 author:
   - name: "Ahmed Sayed (asu.ahmed.sayed@gmail.com)"
     affiliations: "Ain Shams University, Faculty of Medicine"
@@ -378,7 +378,7 @@ for(mcid in mcids) {
 #Like any normal distribution, it is described using 2 parameters: the mean (-0.02) and a standard deviation (0.35)
 
 #Let's simulate a normal distribution with these parameters to see what this looks like
-setseed(100)
+set.seed(100)
 prior_sim <- rnorm(n = 10000, #Number of simulations
       mean = ma_cepd_lnor, #The log-OR from our meta-analysis
       sd = ma_cepd_lnor_sd) #The standard error of the log-OR from our meta-analysis
@@ -408,13 +408,13 @@ newdata_lnor_sd <- round(sqrt(
   2)
 
 #Now we have the SD of our normal distribution as well. We can therefore easily simulate the likelihood function for the data from the PROTECTED TAVR trial as follows:
-setseed(100)
+set.seed(100)
 ptavr_sim <- rnorm(n = 10000,
                    mean = newdata_lnor,
                    sd = newdata_lnor_sd)
 
 ##We can also simulate the normal distribution for our posterior using the model parameters obtained from the "ptavr_model" object above
-setseed(100)
+set.seed(100)
 post_sim <- rnorm(n = 10000,
                   mean = ptavr_cepd_lnor,
                   sd = ptavr_cepd_lnor_sd)
@@ -691,7 +691,7 @@ penalties <- c(1, 2, 5, 10)
 obs_estimates <- data.frame()
 
 for(penalty in penalties) {
-setseed(100)
+set.seed(100)
 obs_est <- rnorm(n = 10000, #Number of simulations
       mean = log(0.82), #The log-OR from the study (Propensity-matched analysis from Table 3 at https://doi.org/10.1161/CIRCULATIONAHA.120.052874)
       sd = 0.087*penalty) #The standard error of the log-OR from the study (calculated using the width of the 95% CI on the log scale divided by 3.92)
