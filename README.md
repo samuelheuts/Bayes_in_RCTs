@@ -25,4 +25,6 @@ You can view our vignettes with full code:
 
 [Here](https://samuelheuts.github.io/Bayes_in_RCTs/docs/mint_trial.html) is the analysis of the MINT trial.
 
-For questions, comments, or pull-requests about the repository, source code or website, please contact surbut@mgh.harvard.edu
+You can download the initial R files (RMD or QMD) in the [Analysis](https://github.com/samuelheuts/Bayes_in_RCTs/tree/main/Analysis_rmds) directory. 
+
+This website was built and maintained by Sarah Urbut, MD PhD. For questions, comments, or pull-requests about the repository, source code or website, please contact surbut@mgh.harvard.edu
